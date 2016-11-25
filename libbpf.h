@@ -2,6 +2,8 @@
 #ifndef __LIBBPF_H
 #define __LIBBPF_H
 
+#include <linux/bpf.h>
+
 struct bpf_insn;
 
 int bpf_create_map(enum bpf_map_type map_type, int key_size, int value_size,

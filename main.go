@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"syscall"
 	"unsafe"
@@ -21,12 +23,69 @@ import (
 #include "libbpf.h"
 #include "bpf_load.h"
 #include "perf_utils.h"
+
+extern void tcpEventCb();
+
+#define TASK_COMM_LEN 16
+
+struct tcp_event_t {
+    char ev_type[12];
+    __u32 pid;
+    char comm[TASK_COMM_LEN];
+    __u32 saddr;
+    __u32 daddr;
+    __u16 sport;
+    __u16 dport;
+    __u32 netns;
+};
 */
 import "C"
 
 var (
 	pmuFD C.int
 )
+
+/*
+type tcpEvent struct {
+	pid   uint32
+	sIP   net.IP
+	dIP   net.IP
+	sPort uint16
+	dPort uint16
+	netns uint32
+	comm  [16]byte
+}
+*/
+
+//export tcpEventCb
+func tcpEventCb(data unsafe.Pointer, size int) {
+	tcpEvent := (*C.struct_tcp_event_t)(data)
+
+	typ := C.GoString(&tcpEvent.ev_type[0])
+	pid := tcpEvent.pid & 0xffffffff
+
+	saddrbuf := make([]byte, 4)
+	daddrbuf := make([]byte, 4)
+
+	binary.LittleEndian.PutUint32(saddrbuf, uint32(tcpEvent.saddr))
+	binary.LittleEndian.PutUint32(daddrbuf, uint32(tcpEvent.daddr))
+
+	sIP := net.IPv4(saddrbuf[0], saddrbuf[1], saddrbuf[2], saddrbuf[3])
+	dIP := net.IPv4(daddrbuf[0], daddrbuf[1], daddrbuf[2], daddrbuf[3])
+
+	sport := tcpEvent.sport
+	dport := tcpEvent.dport
+	netns := tcpEvent.netns
+
+	fmt.Println(typ)
+	fmt.Println(pid)
+	fmt.Println(sIP)
+	fmt.Println(dIP)
+	fmt.Println(sport)
+	fmt.Println(dport)
+	fmt.Println(netns)
+	fmt.Println()
+}
 
 func perfEventMmap(fd int) error {
 	pageSize := os.Getpagesize()
@@ -65,7 +124,7 @@ func testBpfPerfEvent() {
 
 	key := 0
 
-	pmuFD = C.perf_event_open(&attr, -1, 0, -1, 0)
+	pmuFD = C.perf_event_open(&attr, -1 /* pid */, 0 /* cpu */, -1 /* group_fd */, 0)
 
 	ret := C.bpf_update_elem(C.map_fd[0], unsafe.Pointer(&key), unsafe.Pointer(&pmuFD), C.BPF_ANY)
 	if ret != 0 {
@@ -79,7 +138,7 @@ func testBpfPerfEvent() {
 }
 
 func main() {
-	fmt.Println("hello world")
+	fmt.Println("Ready.\n")
 
 	bpfObjectFile := C.CString("../trace_output_kern.o")
 	defer C.free(unsafe.Pointer(bpfObjectFile))
@@ -99,6 +158,6 @@ func main() {
 
 	for {
 		perfEventPoll(int(pmuFD))
-		C.perf_event_read((*[0]byte)(C.print_bpf_output))
+		C.perf_event_read((*[0]byte)(C.tcpEventCb))
 	}
 }

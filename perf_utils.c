@@ -63,20 +63,3 @@ void perf_event_read(print_fn fn)
 	__sync_synchronize(); /* smp_mb() */
 	header->data_tail = data_head;
 }
-
-void print_bpf_output(void *data, int size)
-{
-	struct {
-		char ev_type[12];
-		__u32 pid;
-#define TASK_COMM_LEN 16
-		char comm[TASK_COMM_LEN];
-		__u32 saddr;
-		__u32 daddr;
-		__u16 sport;
-		__u16 dport;
-		__u32 netns;
-	} *e = data;
-
-	printf("tcp_v4_connect '%s' pid %d dport %d\n", e->comm, e->pid, e->dport);
-}
