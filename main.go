@@ -11,7 +11,7 @@ import (
 )
 
 /*
-#cgo CFLAGS: -Wall -Wno-unused-variable -I.
+#cgo CFLAGS: -Wall -Wno-unused-variable
 #cgo LDFLAGS: -lelf
 
 #include <stdlib.h>
@@ -140,7 +140,7 @@ func testBpfPerfEvent() {
 func main() {
 	fmt.Println("Ready.\n")
 
-	bpfObjectFile := C.CString("../trace_output_kern.o")
+	bpfObjectFile := C.CString("kernel/trace_output_kern.o")
 	defer C.free(unsafe.Pointer(bpfObjectFile))
 
 	ret := C.load_bpf_file(bpfObjectFile)
