@@ -15,7 +15,7 @@ import (
 #cgo LDFLAGS: -lelf
 
 #include <stdlib.h>
-#include <stropts.h>
+#include <sys/ioctl.h>
 #include <linux/perf_event.h>
 #include <poll.h>
 #include <errno.h>
