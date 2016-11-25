@@ -133,7 +133,7 @@ func testBpfPerfEvent() {
 
 	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(pmuFD), C.PERF_EVENT_IOC_ENABLE, 0)
 	if err != 0 {
-		log.Fatal("lol error")
+		log.Fatal("error enabling perf event: %v", err)
 	}
 }
 
