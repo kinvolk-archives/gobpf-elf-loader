@@ -15,6 +15,7 @@ import (
 #cgo LDFLAGS: -lelf
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 #include <linux/perf_event.h>
 #include <poll.h>
@@ -40,10 +41,6 @@ struct tcp_event_t {
 };
 */
 import "C"
-
-var (
-	pmuFD C.int
-)
 
 /*
 type tcpEvent struct {
@@ -87,25 +84,13 @@ func tcpEventCb(data unsafe.Pointer, size int) {
 	fmt.Println()
 }
 
-func perfEventMmap(fd int) (*C.struct_perf_event_mmap_page, error) {
-	pageSize := os.Getpagesize()
-	mmapSize := pageSize * (C.PAGE_COUNT + 1)
-
-	base, err := syscall.Mmap(fd, 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
-	if err != nil {
-		return nil, fmt.Errorf("mmap error: %v", err)
-	}
-
-	return (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0])), nil
-}
-
 func perfEventPoll(fd int) error {
 	var pfd C.struct_pollfd
 
 	pfd.fd = C.int(fd)
 	pfd.events = C.POLLIN
 
-	_, err := C.poll(&pfd, 1, 20)
+	_, err := C.poll(&pfd, 1, 1000)
 	if err != nil {
 		return fmt.Errorf("error polling: %v", err.(syscall.Errno))
 	}
@@ -113,26 +98,57 @@ func perfEventPoll(fd int) error {
 	return nil
 }
 
-func testBpfPerfEvent() {
+var cpuName = [...]C.int{0, 1, 2, 3}
+
+func testBpfPerfEvent() ([]C.int, []*C.struct_perf_event_mmap_page, error) {
 	var attr C.struct_perf_event_attr
+	var cpu C.int = 0
+	var pmuFDs []C.int
+	var headers []*C.struct_perf_event_mmap_page
 
-	attr.sample_type = C.PERF_SAMPLE_RAW
+	attr.size = C.sizeof_struct_perf_event_attr
+	attr.config = 10 // PERF_COUNT_SW_BPF_OUTPUT
 	attr._type = C.PERF_TYPE_SOFTWARE
-	attr.config = C.PERF_COUNT_SW_BPF_OUTPUT
+	attr.sample_type = C.PERF_SAMPLE_RAW
 
-	key := 0
+	for {
+		pmuFD := C.perf_event_open(&attr, -1 /* pid */, cpuName[cpu] /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
+		if pmuFD < 0 {
+			break
+		}
 
-	pmuFD = C.perf_event_open(&attr, -1 /* pid */, 0 /* cpu */, -1 /* group_fd */, 0)
+		// mmap
+		pageSize := os.Getpagesize()
+		mmapSize := pageSize * (C.PAGE_COUNT + 1)
 
-	ret := C.bpf_update_elem(C.map_fd[0], unsafe.Pointer(&key), unsafe.Pointer(&pmuFD), C.BPF_ANY)
-	if ret != 0 {
-		log.Fatal("bpf_update_elem error: %d", syscall.Errno(ret))
+		base, err := syscall.Mmap(int(pmuFD), 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mmap error: %v", err)
+		}
+
+		// enable
+		_, _, err2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(pmuFD), C.PERF_EVENT_IOC_ENABLE, 0)
+		if err2 != 0 {
+			log.Fatal("error enabling perf event: %v", err2)
+		}
+
+		// assign perf fd tp map
+		ret := C.bpf_update_elem(C.map_fd[0], unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
+		if ret != 0 {
+			break
+			log.Fatal("bpf_update_elem error: %d", syscall.Errno(ret))
+		}
+
+		pmuFDs = append(pmuFDs, pmuFD)
+		headers = append(headers, (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0])))
+
+		cpu++
+		if cpu == 4 {
+			break
+		}
 	}
 
-	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(pmuFD), C.PERF_EVENT_IOC_ENABLE, 0)
-	if err != 0 {
-		log.Fatal("error enabling perf event: %v", err)
-	}
+	return pmuFDs, headers, nil
 }
 
 func main() {
@@ -147,16 +163,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	testBpfPerfEvent()
-
-	header, err := perfEventMmap(int(pmuFD))
+	pmuFDs, headers, err := testBpfPerfEvent()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "perfEventMmap error: %v\n", ret)
+		fmt.Fprintf(os.Stderr, "perf error: %v\n", ret)
 		os.Exit(1)
 	}
 
-	for {
-		perfEventPoll(int(pmuFD))
-		C.perf_event_read(header, (*[0]byte)(C.tcpEventCb))
+	for i, _ := range pmuFDs {
+		go func(cpu int) {
+			for {
+				perfEventPoll(int(pmuFDs[cpu]))
+				C.perf_event_read(headers[cpu], (*[0]byte)(C.tcpEventCb))
+			}
+		}(i)
 	}
+
+	select {}
 }

@@ -84,7 +84,7 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 
 	// do not send event if IP address is 0.0.0.0 or port is 0
 	if (evt.saddr != 0 && evt.daddr != 0 && evt.sport != 0 && evt.dport != 0) {
-		bpf_perf_event_output(ctx, &tcp_event, 0, &evt, sizeof(evt));
+		bpf_perf_event_output(ctx, &tcp_event, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 	}
 
 	bpf_map_delete_elem(&connectsock, &pid);
