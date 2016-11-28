@@ -87,18 +87,16 @@ func tcpEventCb(data unsafe.Pointer, size int) {
 	fmt.Println()
 }
 
-func perfEventMmap(fd int) error {
+func perfEventMmap(fd int) (*C.struct_perf_event_mmap_page, error) {
 	pageSize := os.Getpagesize()
 	mmapSize := pageSize * (C.PAGE_COUNT + 1)
 
 	base, err := syscall.Mmap(fd, 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
-		return fmt.Errorf("mmap error: %v", err)
+		return nil, fmt.Errorf("mmap error: %v", err)
 	}
 
-	C.header = (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0]))
-
-	return nil
+	return (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0])), nil
 }
 
 func perfEventPoll(fd int) error {
@@ -151,13 +149,14 @@ func main() {
 
 	testBpfPerfEvent()
 
-	if err := perfEventMmap(int(pmuFD)); err != nil {
+	header, err := perfEventMmap(int(pmuFD))
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "perfEventMmap error: %v\n", ret)
 		os.Exit(1)
 	}
 
 	for {
 		perfEventPoll(int(pmuFD))
-		C.perf_event_read((*[0]byte)(C.tcpEventCb))
+		C.perf_event_read(header, (*[0]byte)(C.tcpEventCb))
 	}
 }

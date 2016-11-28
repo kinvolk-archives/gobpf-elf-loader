@@ -7,7 +7,7 @@
 #include "bpf_load.h"
 #include "perf_utils.h"
 
-void perf_event_read(print_fn fn)
+void perf_event_read(volatile struct perf_event_mmap_page *header, print_fn fn)
 {
 	int page_size;
 	page_size = getpagesize();

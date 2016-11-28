@@ -20,8 +20,6 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 int bpf_obj_pin(int fd, const char *pathname);
 int bpf_obj_get(const char *pathname);
 
-volatile struct perf_event_mmap_page *header;
-
 #define PAGE_COUNT 8
 
 #define LOG_BUF_SIZE 65536

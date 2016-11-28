@@ -6,5 +6,5 @@ struct perf_event_sample {
 	char data[];
 };
 
-void perf_event_read(print_fn fn);
+void perf_event_read(volatile struct perf_event_mmap_page *header, print_fn fn);
 void print_bpf_output(void *data, int size);
