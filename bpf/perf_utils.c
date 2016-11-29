@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <linux/perf_event.h>
 #include "libbpf.h"
-#include "bpf_load.h"
 #include "perf_utils.h"
 
 void perf_event_read(volatile struct perf_event_mmap_page *header, print_fn fn)

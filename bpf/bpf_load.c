@@ -19,34 +19,20 @@
 #include <ctype.h>
 #include "libbpf.h"
 #include "bpf_helpers.h"
-#include "bpf_load.h"
 
 #define DEBUGFS "/sys/kernel/debug/tracing/"
 
 static char license[128];
 static int kern_version;
 static bool processed_sec[128];
-int map_fd[MAX_MAPS];
-int prog_fd[MAX_PROGS];
-int event_fd[MAX_PROGS];
+int map_fd[32];
+int prog_fd[32];
+int event_fd[32];
 int prog_cnt;
 int prog_array_fd = -1;
 
-static int populate_prog_array(const char *event, int prog_fd)
-{
-	int ind = atoi(event), err;
-
-	err = bpf_update_elem(prog_array_fd, &ind, &prog_fd, BPF_ANY);
-	if (err < 0) {
-		printf("failed to store prog_fd in prog_array\n");
-		return -1;
-	}
-	return 0;
-}
-
 static int load_and_attach(const char *event, struct bpf_insn *prog, int size)
 {
-	bool is_socket = strncmp(event, "socket", 6) == 0;
 	bool is_kprobe = strncmp(event, "kprobe/", 7) == 0;
 	bool is_kretprobe = strncmp(event, "kretprobe/", 10) == 0;
 	bool is_tracepoint = strncmp(event, "tracepoint/", 11) == 0;
@@ -62,16 +48,8 @@ static int load_and_attach(const char *event, struct bpf_insn *prog, int size)
 	attr.sample_period = 1;
 	attr.wakeup_events = 1;
 
-	if (is_socket) {
-		prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
-	} else if (is_kprobe || is_kretprobe) {
+	if (is_kprobe || is_kretprobe) {
 		prog_type = BPF_PROG_TYPE_KPROBE;
-	//} else if (is_tracepoint) {
-	//	prog_type = BPF_PROG_TYPE_TRACEPOINT;
-	//} else if (is_xdp) {
-	//	prog_type = BPF_PROG_TYPE_XDP;
-	//} else if (is_perf_event) {
-	//	prog_type = BPF_PROG_TYPE_PERF_EVENT;
 	} else {
 		printf("Unknown event '%s'\n", event);
 		return -1;
@@ -88,18 +66,6 @@ static int load_and_attach(const char *event, struct bpf_insn *prog, int size)
 	if (is_xdp || is_perf_event)
 		return 0;
 
-	if (is_socket) {
-		event += 6;
-		if (*event != '/')
-			return 0;
-		event++;
-		if (!isdigit(*event)) {
-			printf("invalid prog number\n");
-			return -1;
-		}
-		return populate_prog_array(event, fd);
-	}
-
 	if (is_kprobe || is_kretprobe) {
 		if (is_kprobe)
 			event += 7;
@@ -110,9 +76,6 @@ static int load_and_attach(const char *event, struct bpf_insn *prog, int size)
 			printf("event name cannot be empty\n");
 			return -1;
 		}
-
-		if (isdigit(*event))
-			return populate_prog_array(event, fd);
 
 		snprintf(buf, sizeof(buf),
 			 "echo '%c:%c%s %s' >> /sys/kernel/debug/tracing/kprobe_events",
@@ -361,86 +324,4 @@ int load_bpf_file(char *path)
 
 	close(fd);
 	return 0;
-}
-
-void read_trace_pipe(void)
-{
-	int trace_fd;
-
-	trace_fd = open(DEBUGFS "trace_pipe", O_RDONLY, 0);
-	if (trace_fd < 0)
-		return;
-
-	while (1) {
-		static char buf[4096];
-		ssize_t sz;
-
-		sz = read(trace_fd, buf, sizeof(buf));
-		if (sz > 0) {
-			buf[sz] = 0;
-			puts(buf);
-		}
-	}
-}
-
-#define MAX_SYMS 300000
-static struct ksym syms[MAX_SYMS];
-static int sym_cnt;
-
-static int ksym_cmp(const void *p1, const void *p2)
-{
-	return ((struct ksym *)p1)->addr - ((struct ksym *)p2)->addr;
-}
-
-int load_kallsyms(void)
-{
-	FILE *f = fopen("/proc/kallsyms", "r");
-	char func[256], buf[256];
-	char symbol;
-	void *addr;
-	int i = 0;
-
-	if (!f)
-		return -ENOENT;
-
-	while (!feof(f)) {
-		if (!fgets(buf, sizeof(buf), f))
-			break;
-		if (sscanf(buf, "%p %c %s", &addr, &symbol, func) != 3)
-			break;
-		if (!addr)
-			continue;
-		syms[i].addr = (long) addr;
-		syms[i].name = strdup(func);
-		i++;
-	}
-	sym_cnt = i;
-	qsort(syms, sym_cnt, sizeof(struct ksym), ksym_cmp);
-	return 0;
-}
-
-struct ksym *ksym_search(long key)
-{
-	int start = 0, end = sym_cnt;
-	int result;
-
-	while (start < end) {
-		size_t mid = start + (end - start) / 2;
-
-		result = key - syms[mid].addr;
-		if (result < 0)
-			end = mid;
-		else if (result > 0)
-			start = mid + 1;
-		else
-			return &syms[mid];
-	}
-
-	if (start >= 1 && syms[start - 1].addr < key &&
-	    key < syms[start].addr)
-		/* valid ksym */
-		return &syms[start - 1];
-
-	/* out of range. return _stext */
-	return &syms[0];
 }
