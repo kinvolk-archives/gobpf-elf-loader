@@ -7,7 +7,7 @@ import (
 	"os"
 	"unsafe"
 
-	bpf "github.com/alban/go-ebpf-kprobe-example/bpf"
+	bpf "github.com/kinvolk/go-ebpf-kprobe-example/bpf"
 )
 
 /*
