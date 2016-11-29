@@ -81,8 +81,6 @@ int bpf_get_next_key(int fd, void *key, void *next_key)
 	return syscall(__NR_bpf, BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
 }
 
-#define ROUND_UP(x, n) (((x) + (n) - 1u) & ~((n) - 1u))
-
 char bpf_log_buf[LOG_BUF_SIZE];
 
 int bpf_prog_load(enum bpf_prog_type prog_type,
@@ -107,49 +105,6 @@ int bpf_prog_load(enum bpf_prog_type prog_type,
 	bpf_log_buf[0] = 0;
 
 	return syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
-}
-
-int bpf_obj_pin(int fd, const char *pathname)
-{
-	union bpf_attr attr = {
-		.pathname	= ptr_to_u64((void *)pathname),
-		.bpf_fd		= fd,
-	};
-
-	return syscall(__NR_bpf, BPF_OBJ_PIN, &attr, sizeof(attr));
-}
-
-int bpf_obj_get(const char *pathname)
-{
-	union bpf_attr attr = {
-		.pathname	= ptr_to_u64((void *)pathname),
-	};
-
-	return syscall(__NR_bpf, BPF_OBJ_GET, &attr, sizeof(attr));
-}
-
-int open_raw_sock(const char *name)
-{
-	struct sockaddr_ll sll;
-	int sock;
-
-	sock = socket(PF_PACKET, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, htons(ETH_P_ALL));
-	if (sock < 0) {
-		printf("cannot create raw socket\n");
-		return -1;
-	}
-
-	memset(&sll, 0, sizeof(sll));
-	sll.sll_family = AF_PACKET;
-	sll.sll_ifindex = if_nametoindex(name);
-	sll.sll_protocol = htons(ETH_P_ALL);
-	if (bind(sock, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
-		printf("bind to %s: %s\n", name, strerror(errno));
-		close(sock);
-		return -1;
-	}
-
-	return sock;
 }
 
 int perf_event_open(struct perf_event_attr *attr, int pid, int cpu,
