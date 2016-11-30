@@ -244,7 +244,7 @@ static int parse_relo_and_apply(Elf_Data *data, Elf_Data *symbols,
 
 int load_bpf_file(char *path)
 {
-	int fd, i;
+	int fd, i, ret;
 	Elf *elf;
 	GElf_Ehdr ehdr;
 	GElf_Shdr shdr, shdr_prog;
@@ -325,8 +325,13 @@ int load_bpf_file(char *path)
 			    memcmp(shname_prog, "tracepoint/", 11) == 0 ||
 			    memcmp(shname_prog, "xdp", 3) == 0 ||
 			    memcmp(shname_prog, "perf_event", 10) == 0 ||
-			    memcmp(shname_prog, "socket", 6) == 0)
-				load_and_attach(shname_prog, insns, data_prog->d_size);
+			    memcmp(shname_prog, "socket", 6) == 0){
+				ret = load_and_attach(shname_prog, insns, data_prog->d_size);
+				if (ret < 0){
+					printf("ERROR load_and_attach: shname_prog: %s\n", shname_prog);
+					return ret;
+				}
+			}
 		}
 	}
 
@@ -344,8 +349,13 @@ int load_bpf_file(char *path)
 		    memcmp(shname, "tracepoint/", 11) == 0 ||
 		    memcmp(shname, "xdp", 3) == 0 ||
 		    memcmp(shname, "perf_event", 10) == 0 ||
-		    memcmp(shname, "socket", 6) == 0)
-			load_and_attach(shname, data->d_buf, data->d_size);
+		    memcmp(shname, "socket", 6) == 0){
+			ret = load_and_attach(shname, data->d_buf, data->d_size);
+			if (ret < 0) {
+				printf("ERROR load_and_attach: shname: %s\n",shname);
+				return ret;
+			}
+		}
 	}
 
 	close(fd);
