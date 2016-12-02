@@ -10,7 +10,6 @@ import (
 
 /*
 #cgo CFLAGS: -Wall -Wno-unused-variable
-#cgo LDFLAGS: -lelf
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -24,8 +23,6 @@ import (
 
 #define MAX_MAPS 32
 extern int map_fd[MAX_MAPS];
-
-int load_bpf_file(char *path);
 
 extern void eventCb();
 */
@@ -69,10 +66,9 @@ func NewBpfPerfEvent(fileName string) (*BpfPerfEvent, error) {
 	bpfObjectFile := C.CString(fileName)
 	defer C.free(unsafe.Pointer(bpfObjectFile))
 
-	ret := C.load_bpf_file(bpfObjectFile)
-	if ret != 0 {
-		return nil, fmt.Errorf("load_bpf_file error: %v\n", syscall.Errno(ret))
-		os.Exit(1)
+	mapFds, _, _, err := loadBpfFile(fileName)
+	if err != nil {
+		return nil, err
 	}
 
 	var attr C.struct_perf_event_attr
@@ -107,10 +103,10 @@ func NewBpfPerfEvent(fileName string) (*BpfPerfEvent, error) {
 		}
 
 		// assign perf fd tp map
-		ret := C.bpf_update_elem(C.map_fd[0], unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
+		ret := C.bpf_update_elem(C.int(mapFds[0]), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
 		if ret != 0 {
-			break
 			log.Fatal("bpf_update_elem error: %d", syscall.Errno(ret))
+			break
 		}
 
 		pmuFDs = append(pmuFDs, pmuFD)
