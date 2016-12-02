@@ -32,11 +32,17 @@ import (
 #include <linux/perf_event.h>
 #include <sys/resource.h>
 
-
-#include "libbpf.h"
-
 // from https://github.com/safchain/goebpf
 // Apache License
+
+// bpf map structure used by C program to define maps and
+// used by elf loader.
+typedef struct bpf_map_def {
+  unsigned int type;
+  unsigned int key_size;
+  unsigned int value_size;
+  unsigned int max_entries;
+} bpf_map_def;
 
 typedef struct bpf_map {
 	int         fd;
