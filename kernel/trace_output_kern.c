@@ -3,7 +3,7 @@
 #include <linux/ptrace.h>
 #include <linux/version.h>
 #include <linux/bpf.h>
-#include "../bpf_helpers.h"
+#include "bpf_helpers.h"
 
 #include <net/sock.h>
 #include <net/inet_sock.h>

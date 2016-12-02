@@ -70,9 +70,11 @@ func tcpEventCb(data []byte) {
 func main() {
 	fmt.Println("Ready.\n")
 
-	b, err := bpf.NewBpfPerfEvent("kernel/trace_output_kern.o")
+	b := bpf.NewBpfPerfEvent("kernel/trace_output_kern.o")
+
+	err := b.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "perf error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 
