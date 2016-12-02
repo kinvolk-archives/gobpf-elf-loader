@@ -179,10 +179,17 @@ static int bpf_update_element(int fd, void *key, void *value, unsigned long long
 }
 
 
-static int perf_event_open(struct perf_event_attr *attr, int pid, int cpu,
-                           int group_fd, unsigned long flags)
+static int perf_event_open_map(int pid, int cpu, int group_fd, unsigned long flags)
 {
-       return syscall(__NR_perf_event_open, attr, pid, cpu,
+	struct perf_event_attr attr = {0,};
+	attr.type = PERF_TYPE_SOFTWARE;
+	attr.sample_type = PERF_SAMPLE_RAW;
+	attr.wakeup_events = 1;
+
+	attr.size = sizeof(struct perf_event_attr);
+	attr.config = 10; // PERF_COUNT_SW_BPF_OUTPUT
+
+       return syscall(__NR_perf_event_open, &attr, pid, cpu,
                       group_fd, flags);
 }
 
@@ -309,13 +316,18 @@ type BPFKProbePerf struct {
 	probes map[string]*BPFKProbe
 }
 
-func perfEventPoll(fd int) error {
-	var pfd C.struct_pollfd
+func perfEventPoll(fds []C.int) error {
+	var pfds []C.struct_pollfd
 
-	pfd.fd = C.int(fd)
-	pfd.events = C.POLLIN
+	for i, _ := range fds {
+		var pfd C.struct_pollfd
 
-	_, err := C.poll(&pfd, 1, 1000)
+		pfd.fd = fds[i]
+		pfd.events = C.POLLIN
+
+		pfds = append(pfds, pfd)
+	}
+	_, err := C.poll(&pfds[0], C.nfds_t(len(fds)), 1000)
 	if err != nil {
 		return fmt.Errorf("error polling: %v", err.(syscall.Errno))
 	}
@@ -604,16 +616,10 @@ func (b *BPFKProbePerf) Load() error {
 	}
 
 	for name, _ := range b.maps {
-		var attr C.struct_perf_event_attr
 		var cpu C.int = 0
 
-		attr.size = C.sizeof_struct_perf_event_attr
-		attr.config = 10 // PERF_COUNT_SW_BPF_OUTPUT
-		attr._type = C.PERF_TYPE_SOFTWARE
-		attr.sample_type = C.PERF_SAMPLE_RAW
-
 		for {
-			pmuFD := C.perf_event_open(&attr, -1 /* pid */, cpu /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
+			pmuFD := C.perf_event_open_map(-1 /* pid */, cpu /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
 			if pmuFD < 0 {
 				if cpu == 0 {
 					return fmt.Errorf("perf_event_open for map error: %v", err)
@@ -714,12 +720,14 @@ func (b *BPFKProbePerf) Poll(mapName string, cb EventCb) {
 	// https://github.com/iovisor/gobpf/pull/2/files#diff-51d172d4e15a1a9ddb788f8eb973a93fR70
 	myEventCb = cb
 
-	for i, _ := range b.maps[mapName].pmuFDs {
-		go func(cpu int) {
-			for {
-				perfEventPoll(int(b.maps[mapName].pmuFDs[cpu]))
+	cpuCount := len(b.maps[mapName].pmuFDs)
+
+	go func() {
+		for {
+			perfEventPoll(b.maps[mapName].pmuFDs)
+			for cpu := 0; cpu < cpuCount; cpu++ {
 				C.perf_event_read(b.maps[mapName].headers[cpu], (*[0]byte)(C.eventCb))
 			}
-		}(i)
-	}
+		}
+	}()
 }
