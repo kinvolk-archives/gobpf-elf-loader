@@ -12,27 +12,26 @@ import (
 
 /*
 #cgo CFLAGS: -Wall -Wno-unused-variable
-#cgo LDFLAGS: -lelf
 
 #include <stdlib.h>
 #include <stdint.h>
-#include <sys/ioctl.h>
-#include <linux/perf_event.h>
+//#include <sys/ioctl.h>
+//#include <linux/perf_event.h>
 #include <poll.h>
 #include <errno.h>
-#include <linux/bpf.h>
+//#include <linux/bpf.h>
 
 #define TASK_COMM_LEN 16
 
 struct tcp_event_t {
     char ev_type[12];
-    __u32 pid;
+    uint32_t pid;
     char comm[TASK_COMM_LEN];
-    __u32 saddr;
-    __u32 daddr;
-    __u16 sport;
-    __u16 dport;
-    __u32 netns;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint16_t sport;
+    uint16_t dport;
+    uint32_t netns;
 };
 */
 import "C"
@@ -57,19 +56,10 @@ func tcpEventCb(data []byte) {
 	dport := tcpEvent.dport
 	netns := tcpEvent.netns
 
-	fmt.Println(typ)
-	fmt.Println(pid)
-	fmt.Println(sIP)
-	fmt.Println(dIP)
-	fmt.Println(sport)
-	fmt.Println(dport)
-	fmt.Println(netns)
-	fmt.Println()
+	fmt.Printf("%s %v %v:%v %v:%v %v\n", typ, pid, sIP, sport, dIP, dport, netns)
 }
 
 func main() {
-	fmt.Println("Ready.\n")
-
 	b := bpf.NewBpfPerfEvent("kernel/trace_output_kern.o")
 
 	err := b.Load()
@@ -78,6 +68,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	fmt.Printf("Ready.\n")
 	b.Poll("tcp_event", tcpEventCb)
 
 	select {}
