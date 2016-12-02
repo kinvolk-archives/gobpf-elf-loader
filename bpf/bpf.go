@@ -185,8 +185,10 @@ var myEventCb EventCb
 
 // BPFMap represents a eBPF map. An eBPF map has to be declared in the C file
 type BPFMap struct {
-	Name string
-	m    *C.bpf_map
+	Name       string
+	SectionIdx int
+	Idx        int
+	m          *C.bpf_map
 }
 
 // BPFKProbe represents a kprobe or kretprobe. they have to be declared in the C file
@@ -277,9 +279,9 @@ func (b *BPFKProbePerf) readVersion() (int, error) {
 }
 
 func (b *BPFKProbePerf) readMaps() error {
-	for _, section := range b.file.Sections {
-		fmt.Printf("searching maps: %s\n", section.Name)
-		if section.Name == "maps" {
+	for sectionIdx, section := range b.file.Sections {
+		fmt.Printf("searching maps: %d: %s\n", sectionIdx, section.Name)
+		if strings.HasPrefix(section.Name, "maps/") {
 			data, err := section.Data()
 			if err != nil {
 				return err
@@ -287,14 +289,28 @@ func (b *BPFKProbePerf) readMaps() error {
 
 			name := strings.TrimPrefix(section.Name, "maps/")
 
-			cm := C.bpf_load_map((*C.bpf_map_def)(unsafe.Pointer(&data[0])))
-			if cm == nil {
-				return fmt.Errorf("Error while loading map %s", section.Name)
+			mapCount := len(data) / C.sizeof_struct_bpf_map_def
+			for i := 0; i < mapCount; i++ {
+				pos := i * C.sizeof_struct_bpf_map_def
+				cm := C.bpf_load_map((*C.bpf_map_def)(unsafe.Pointer(&data[pos])))
+				if cm == nil {
+					return fmt.Errorf("Error while loading map %s", section.Name)
+				}
+
+				m := &BPFMap{
+					Name:       name,
+					SectionIdx: sectionIdx,
+					Idx:        i,
+					m:          cm,
+				}
+
+				if oldMap, ok := b.maps[name]; ok {
+					return fmt.Errorf("duplicate map: %q (section %q) and %q (section %q)",
+						oldMap.Name, b.file.Sections[oldMap.SectionIdx].Name,
+						name, section.Name)
+				}
+				b.maps[name] = m
 			}
-
-			m := &BPFMap{Name: name, m: cm}
-
-			b.maps[name] = m
 		}
 	}
 
@@ -352,13 +368,19 @@ func (b *BPFKProbePerf) relocate(data []byte, rdata []byte) error {
 		}
 
 		symbolSec := b.file.Sections[symbol.Section]
+		if !strings.HasPrefix(symbolSec.Name, "maps/") {
+			return fmt.Errorf("map location not supported: map %q is in section %q instead of \"maps/%s\"",
+				symbol.Name, symbolSec.Name, symbol.Name)
+		}
 		name := strings.TrimPrefix(symbolSec.Name, "maps/")
 
 		m := b.Map(name)
 		if m == nil {
-			return fmt.Errorf("relocation error, map not found: %v", b.maps)
+			return fmt.Errorf("relocation error, symbol %q not found in section %q",
+				symbol.Name, symbolSec.Name)
 		}
 
+		fmt.Printf("symbol: %v\n", symbol)
 		C.bpf_apply_relocation(m.m.fd, rinsn)
 	}
 }
@@ -435,7 +457,7 @@ func (b *BPFKProbePerf) Load() error {
 					(*C.char)(lp), C.int(version),
 					(*C.char)(unsafe.Pointer(&b.log[0])), C.int(len(b.log)))
 				if fd < 0 {
-					return errors.New("Error while loading")
+					return fmt.Errorf("error while loading %q:\n%s", rsection.Name, b.log)
 				}
 				b.probes[rsection.Name] = &BPFKProbe{
 					Name: rsection.Name,
@@ -467,7 +489,7 @@ func (b *BPFKProbePerf) Load() error {
 				(*C.char)(lp), C.int(version),
 				(*C.char)(unsafe.Pointer(&b.log[0])), C.int(len(b.log)))
 			if fd < 0 {
-				panic(errors.New("Error while loading bpf prog"))
+				return fmt.Errorf("error while loading %q:\n%s", section.Name, b.log)
 			}
 			b.probes[section.Name] = &BPFKProbe{
 				Name: section.Name,

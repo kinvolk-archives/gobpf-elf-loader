@@ -20,14 +20,14 @@ struct tcp_event_t {
 	u32 netns;
 };
 
-struct bpf_map_def SEC("maps") tcp_event = {
+struct bpf_map_def SEC("maps/tcp_event") tcp_event = {
 	.type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
 	.key_size = sizeof(int),
 	.value_size = sizeof(__u32),
 	.max_entries = 16,
 };
 
-struct bpf_map_def SEC("maps") connectsock = {
+struct bpf_map_def SEC("maps/connectsock") connectsock = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u64),
 	.value_size = sizeof(void *),
