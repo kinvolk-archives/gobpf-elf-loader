@@ -17,6 +17,7 @@ import (
 
 /*
 #include <sys/types.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -29,6 +30,8 @@ import (
 #include <linux/bpf.h>
 #include <poll.h>
 #include <linux/perf_event.h>
+#include <sys/resource.h>
+
 
 #include "libbpf.h"
 
@@ -54,6 +57,7 @@ static void bpf_apply_relocation(int fd, struct bpf_insn *insn)
 static int bpf_create_map(enum bpf_map_type map_type, int key_size,
 	int value_size, int max_entries)
 {
+	int ret;
 	union bpf_attr attr;
 	memset(&attr, 0, sizeof(attr));
 
@@ -62,7 +66,31 @@ static int bpf_create_map(enum bpf_map_type map_type, int key_size,
 	attr.value_size = value_size;
 	attr.max_entries = max_entries;
 
-	return syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+	ret = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+	if (ret < 0 && errno == EPERM) {
+		// When EPERM is returned, two reasons are possible:
+		// 1. user has no permissions for bpf()
+		// 2. user has insufficent rlimit for locked memory
+		// Unfortunately, there is no api to inspect the current usage of locked
+		// mem for the user, so an accurate calculation of how much memory to lock
+		// for this new program is difficult to calculate. As a hack, bump the limit
+		// to unlimited. If program load fails again, return the error.
+
+		struct rlimit rl = {};
+		if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+			rl.rlim_max = RLIM_INFINITY;
+			rl.rlim_cur = rl.rlim_max;
+			if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+				ret = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+			}
+			else {
+				printf("setrlimit() failed with errno=%d\n", errno);
+				return -1;
+			}
+		}
+	}
+
+	return ret;
 }
 
 static bpf_map *bpf_load_map(bpf_map_def *map_def)
@@ -92,6 +120,7 @@ static int bpf_prog_load(enum bpf_prog_type prog_type,
 	const char *license, int kern_version,
 	char *log_buf, int log_size)
 {
+	int ret;
 	union bpf_attr attr;
 	memset(&attr, 0, sizeof(attr));
 
@@ -104,7 +133,31 @@ static int bpf_prog_load(enum bpf_prog_type prog_type,
 	attr.log_level = 1;
 	attr.kern_version = kern_version;
 
-	return syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
+	ret = syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
+	if (ret < 0 && errno == EPERM) {
+		// When EPERM is returned, two reasons are possible:
+		// 1. user has no permissions for bpf()
+		// 2. user has insufficent rlimit for locked memory
+		// Unfortunately, there is no api to inspect the current usage of locked
+		// mem for the user, so an accurate calculation of how much memory to lock
+		// for this new program is difficult to calculate. As a hack, bump the limit
+		// to unlimited. If program load fails again, return the error.
+
+		struct rlimit rl = {};
+		if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+			rl.rlim_max = RLIM_INFINITY;
+			rl.rlim_cur = rl.rlim_max;
+			if (setrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+				ret = syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
+			}
+			else {
+				printf("setrlimit() failed with errno=%d\n", errno);
+				return -1;
+			}
+		}
+	}
+
+	return ret;
 }
 
 static int bpf_update_element(int fd, void *key, void *value, unsigned long long flags)
