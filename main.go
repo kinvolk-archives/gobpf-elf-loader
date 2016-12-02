@@ -78,7 +78,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	b.Poll(tcpEventCb)
+	b.Poll("tcp_event", tcpEventCb)
 
 	select {}
 }
