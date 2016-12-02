@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -105,7 +107,39 @@ static int bpf_prog_load(enum bpf_prog_type prog_type,
 	return syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr));
 }
 
-// from samples
+static int bpf_update_element(int fd, void *key, void *value, unsigned long long flags)
+{
+	union bpf_attr attr = {
+		.map_fd = fd,
+		.key = ptr_to_u64(key),
+		.value = ptr_to_u64(value),
+		.flags = flags,
+	};
+
+	return syscall(__NR_bpf, BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
+}
+
+
+static int perf_event_open(struct perf_event_attr *attr, int pid, int cpu,
+                           int group_fd, unsigned long flags)
+{
+       return syscall(__NR_perf_event_open, attr, pid, cpu,
+                      group_fd, flags);
+}
+
+static int perf_event_open_tracepoint(int tracepoint_id, int pid, int cpu,
+                           int group_fd, unsigned long flags)
+{
+	struct perf_event_attr attr = {0,};
+	attr.type = PERF_TYPE_TRACEPOINT;
+	attr.sample_type = PERF_SAMPLE_RAW;
+	attr.sample_period = 1;
+	attr.wakeup_events = 1;
+	attr.config = tracepoint_id;
+
+	return syscall(__NR_perf_event_open, &attr, pid, cpu,
+                      group_fd, flags);
+}
 
 #define PAGE_COUNT 8
 
@@ -189,12 +223,17 @@ type BPFMap struct {
 	SectionIdx int
 	Idx        int
 	m          *C.bpf_map
+
+	// only for perf maps
+	pmuFDs  []C.int
+	headers []*C.struct_perf_event_mmap_page
 }
 
 // BPFKProbe represents a kprobe or kretprobe. they have to be declared in the C file
 type BPFKProbe struct {
 	Name string
 	fd   int
+	efd  int
 }
 
 type BPFMapIterator struct {
@@ -209,9 +248,6 @@ type BPFKProbePerf struct {
 	log    []byte
 	maps   map[string]*BPFMap
 	probes map[string]*BPFKProbe
-
-	pmuFDs  []C.int
-	headers []*C.struct_perf_event_mmap_page
 }
 
 func perfEventPoll(fd int) error {
@@ -280,7 +316,6 @@ func (b *BPFKProbePerf) readVersion() (int, error) {
 
 func (b *BPFKProbePerf) readMaps() error {
 	for sectionIdx, section := range b.file.Sections {
-		fmt.Printf("searching maps: %d: %s\n", sectionIdx, section.Name)
 		if strings.HasPrefix(section.Name, "maps/") {
 			data, err := section.Data()
 			if err != nil {
@@ -369,6 +404,7 @@ func (b *BPFKProbePerf) relocate(data []byte, rdata []byte) error {
 
 		symbolSec := b.file.Sections[symbol.Section]
 		if !strings.HasPrefix(symbolSec.Name, "maps/") {
+			fmt.Printf("https://gist.github.com/alban/161ec3c254f05854aeb3ad90730b3fb5\n")
 			return fmt.Errorf("map location not supported: map %q is in section %q instead of \"maps/%s\"",
 				symbol.Name, symbolSec.Name, symbol.Name)
 		}
@@ -380,7 +416,6 @@ func (b *BPFKProbePerf) relocate(data []byte, rdata []byte) error {
 				symbol.Name, symbolSec.Name)
 		}
 
-		fmt.Printf("symbol: %v\n", symbol)
 		C.bpf_apply_relocation(m.m.fd, rinsn)
 	}
 }
@@ -435,7 +470,11 @@ func (b *BPFKProbePerf) Load() error {
 			processed[i] = true
 			processed[section.Info] = true
 
-			if strings.HasPrefix(rsection.Name, "kprobe/") || strings.HasPrefix(rsection.Name, "kretprobe/") {
+			secName := rsection.Name
+			isKprobe := strings.HasPrefix(secName, "kprobe/")
+			isKretprobe := strings.HasPrefix(secName, "kretprobe/")
+
+			if isKprobe || isKretprobe {
 				rdata, err := rsection.Data()
 				if err != nil {
 					return err
@@ -452,16 +491,23 @@ func (b *BPFKProbePerf) Load() error {
 
 				insns := (*C.struct_bpf_insn)(unsafe.Pointer(&rdata[0]))
 
-				fd := C.bpf_prog_load(C.BPF_PROG_TYPE_KPROBE,
+				progFd := C.bpf_prog_load(C.BPF_PROG_TYPE_KPROBE,
 					insns, C.int(rsection.Size),
 					(*C.char)(lp), C.int(version),
 					(*C.char)(unsafe.Pointer(&b.log[0])), C.int(len(b.log)))
-				if fd < 0 {
-					return fmt.Errorf("error while loading %q:\n%s", rsection.Name, b.log)
+				if progFd < 0 {
+					return fmt.Errorf("error while loading %q:\n%s", secName, b.log)
 				}
-				b.probes[rsection.Name] = &BPFKProbe{
-					Name: rsection.Name,
-					fd:   int(fd),
+
+				efd, err := b.EnableKprobe(int(progFd), secName, isKretprobe)
+				if err != nil {
+					return err
+				}
+
+				b.probes[secName] = &BPFKProbe{
+					Name: secName,
+					fd:   int(progFd),
+					efd:  efd,
 				}
 			}
 		}
@@ -498,7 +544,104 @@ func (b *BPFKProbePerf) Load() error {
 		}
 	}
 
+	for name, _ := range b.maps {
+		var attr C.struct_perf_event_attr
+		var cpu C.int = 0
+
+		attr.size = C.sizeof_struct_perf_event_attr
+		attr.config = 10 // PERF_COUNT_SW_BPF_OUTPUT
+		attr._type = C.PERF_TYPE_SOFTWARE
+		attr.sample_type = C.PERF_SAMPLE_RAW
+
+		for {
+			pmuFD := C.perf_event_open(&attr, -1 /* pid */, cpu /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
+			if pmuFD < 0 {
+				if cpu == 0 {
+					return fmt.Errorf("perf_event_open for map error: %v", err)
+				}
+				break
+			}
+
+			// mmap
+			pageSize := os.Getpagesize()
+			mmapSize := pageSize * (C.PAGE_COUNT + 1)
+
+			base, err := syscall.Mmap(int(pmuFD), 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+			if err != nil {
+				return fmt.Errorf("mmap error: %v", err)
+			}
+
+			// enable
+			_, _, err2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(pmuFD), C.PERF_EVENT_IOC_ENABLE, 0)
+			if err2 != 0 {
+				return fmt.Errorf("error enabling perf event: %v", err2)
+			}
+
+			// assign perf fd tp map
+			ret := C.bpf_update_element(C.int(b.maps[name].m.fd), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
+			if ret != 0 {
+				return fmt.Errorf("cannot assign perf fd to map: %d (cpu %d)", syscall.Errno(ret), cpu)
+			}
+
+			b.maps[name].pmuFDs = append(b.maps[name].pmuFDs, pmuFD)
+			b.maps[name].headers = append(b.maps[name].headers, (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0])))
+
+			cpu++
+		}
+	}
+
 	return nil
+}
+
+func (b *BPFKProbePerf) EnableKprobe(progFd int, secName string, isKretprobe bool) (int, error) {
+	var probeType, funcName string
+	if isKretprobe {
+		probeType = "r"
+		funcName = strings.TrimPrefix(secName, "kretprobe/")
+	} else {
+		probeType = "p"
+		funcName = strings.TrimPrefix(secName, "kprobe/")
+	}
+	eventName := probeType + funcName
+
+	kprobeEventsFileName := "/sys/kernel/debug/tracing/kprobe_events"
+	f, err := os.OpenFile(kprobeEventsFileName, os.O_APPEND|os.O_WRONLY, 0666)
+	if err != nil {
+		return 0, fmt.Errorf("cannot open kprobe_events: %v\n", err)
+	}
+	defer f.Close()
+
+	cmd := fmt.Sprintf("%s:%s %s\n", probeType, eventName, funcName)
+	_, err = f.WriteString(cmd)
+	if err != nil {
+		return 0, fmt.Errorf("cannot write %q to kprobe_events: %v\n", cmd, err)
+	}
+
+	kprobeIdFile := fmt.Sprintf("/sys/kernel/debug/tracing/events/kprobes/%s/id", eventName)
+	kprobeIdBytes, err := ioutil.ReadFile(kprobeIdFile)
+	if err != nil {
+		return 0, fmt.Errorf("cannot read kprobe id: %v\n", err)
+	}
+	kprobeId, err := strconv.Atoi(strings.TrimSpace(string(kprobeIdBytes)))
+	if err != nil {
+		return 0, fmt.Errorf("invalid kprobe id): %v\n", err)
+	}
+
+	efd := C.perf_event_open_tracepoint(C.int(kprobeId), -1 /* pid */, 0 /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
+	if efd < 0 {
+		return 0, fmt.Errorf("perf_event_open for kprobe error")
+	}
+
+	_, _, err2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(efd), C.PERF_EVENT_IOC_ENABLE, 0)
+	if err2 != 0 {
+		return 0, fmt.Errorf("error enabling perf event: %v", err2)
+	}
+
+	_, _, err2 = syscall.Syscall(syscall.SYS_IOCTL, uintptr(efd), C.PERF_EVENT_IOC_SET_BPF, uintptr(progFd))
+	if err2 != 0 {
+		return 0, fmt.Errorf("error enabling perf event: %v", err2)
+	}
+	return int(efd), nil
 }
 
 // Map returns the BPFMap for the given name. The name is the name used for
@@ -507,78 +650,16 @@ func (b *BPFKProbePerf) Map(name string) *BPFMap {
 	return b.maps[name]
 }
 
-//func foo() {
-//	bpfObjectFile := C.CString(fileName)
-//	defer C.free(unsafe.Pointer(bpfObjectFile))
-//
-//	mapFds, _, _, err := loadBpfFile(fileName)
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	var attr C.struct_perf_event_attr
-//	var cpu C.int = 0
-//	var pmuFDs []C.int
-//	var headers []*C.struct_perf_event_mmap_page
-//
-//	attr.size = C.sizeof_struct_perf_event_attr
-//	attr.config = 10 // PERF_COUNT_SW_BPF_OUTPUT
-//	attr._type = C.PERF_TYPE_SOFTWARE
-//	attr.sample_type = C.PERF_SAMPLE_RAW
-//
-//	for {
-//		pmuFD := C.perf_event_open(&attr, -1 /* pid */, cpu /* cpu */, -1 /* group_fd */, C.PERF_FLAG_FD_CLOEXEC)
-//		if pmuFD < 0 {
-//			break
-//		}
-//
-//		// mmap
-//		pageSize := os.Getpagesize()
-//		mmapSize := pageSize * (C.PAGE_COUNT + 1)
-//
-//		base, err := syscall.Mmap(int(pmuFD), 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
-//		if err != nil {
-//			return nil, fmt.Errorf("mmap error: %v", err)
-//		}
-//
-//		// enable
-//		_, _, err2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(pmuFD), C.PERF_EVENT_IOC_ENABLE, 0)
-//		if err2 != 0 {
-//			log.Fatal("error enabling perf event: %v", err2)
-//		}
-//
-//		// assign perf fd tp map
-//		ret := C.bpf_update_elem(C.int(mapFds[0]), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
-//		if ret != 0 {
-//			log.Fatal("bpf_update_elem error: %d", syscall.Errno(ret))
-//			break
-//		}
-//
-//		pmuFDs = append(pmuFDs, pmuFD)
-//		headers = append(headers, (*C.struct_perf_event_mmap_page)(unsafe.Pointer(&base[0])))
-//
-//		cpu++
-//		if cpu == 4 {
-//			break
-//		}
-//	}
-//
-//	return &BPFKProbePerf{
-//		pmuFDs:  pmuFDs,
-//		headers: headers,
-//	}, nil
-//}
-
-func (b *BPFKProbePerf) Poll(cb EventCb) {
+func (b *BPFKProbePerf) Poll(mapName string, cb EventCb) {
 	// TODO: do something like
 	// https://github.com/iovisor/gobpf/pull/2/files#diff-51d172d4e15a1a9ddb788f8eb973a93fR70
 	myEventCb = cb
 
-	for i, _ := range b.pmuFDs {
+	for i, _ := range b.maps[mapName].pmuFDs {
 		go func(cpu int) {
 			for {
-				perfEventPoll(int(b.pmuFDs[cpu]))
-				C.perf_event_read(b.headers[cpu], (*[0]byte)(C.eventCb))
+				perfEventPoll(int(b.maps[mapName].pmuFDs[cpu]))
+				C.perf_event_read(b.maps[mapName].headers[cpu], (*[0]byte)(C.eventCb))
 			}
 		}(i)
 	}
