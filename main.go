@@ -36,6 +36,23 @@ struct tcp_event_t {
 */
 import "C"
 
+var byteOrder binary.ByteOrder
+
+// In lack of binary.HostEndian ...
+func init() {
+	var i int32 = 0x01020304
+	u := unsafe.Pointer(&i)
+	pb := (*byte)(u)
+	b := *pb
+	if b == 0x04 {
+		byteOrder = binary.LittleEndian
+	} else {
+		byteOrder = binary.BigEndian
+	}
+}
+
+var lastTimestamp uint64
+
 //export tcpEventCb
 func tcpEventCb(data []byte) {
 	tcpEvent := (*C.struct_tcp_event_t)(unsafe.Pointer(&data[0]))
@@ -46,8 +63,8 @@ func tcpEventCb(data []byte) {
 	saddrbuf := make([]byte, 4)
 	daddrbuf := make([]byte, 4)
 
-	binary.LittleEndian.PutUint32(saddrbuf, uint32(tcpEvent.saddr))
-	binary.LittleEndian.PutUint32(daddrbuf, uint32(tcpEvent.daddr))
+	byteOrder.PutUint32(saddrbuf, uint32(tcpEvent.saddr))
+	byteOrder.PutUint32(daddrbuf, uint32(tcpEvent.daddr))
 
 	sIP := net.IPv4(saddrbuf[0], saddrbuf[1], saddrbuf[2], saddrbuf[3])
 	dIP := net.IPv4(daddrbuf[0], daddrbuf[1], daddrbuf[2], daddrbuf[3])
