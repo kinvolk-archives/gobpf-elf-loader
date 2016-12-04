@@ -9,8 +9,10 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -209,7 +211,7 @@ static int perf_event_open_tracepoint(int tracepoint_id, int pid, int cpu,
 
 #define PAGE_COUNT 8
 
-typedef void (*print_fn)(void *data, int size);
+typedef int (*consume_fn)(void *data, int size, int callbackIndex);
 
 struct perf_event_sample {
 	struct perf_event_header header;
@@ -217,8 +219,9 @@ struct perf_event_sample {
 	char data[];
 };
 
-static void perf_event_read(volatile struct perf_event_mmap_page *header, print_fn fn)
+static int perf_event_read(volatile struct perf_event_mmap_page *header, consume_fn fn, uint64_t callback_data_index)
 {
+	int consumed = 0;
 	int page_size;
 	page_size = getpagesize();
 
@@ -230,7 +233,7 @@ static void perf_event_read(volatile struct perf_event_mmap_page *header, print_
 
 	asm volatile("" ::: "memory"); // in real code it should be smp_rmb()
 	if (data_head == data_tail)
-		return;
+		return 0;
 
 	base = ((char *)header) + page_size;
 
@@ -256,7 +259,7 @@ static void perf_event_read(volatile struct perf_event_mmap_page *header, print_
 		}
 
 		if (e->header.type == PERF_RECORD_SAMPLE) {
-			fn(e->data, e->size);
+			consumed = fn(e->data, e->size, callback_data_index) || consumed;
 		} else if (e->header.type == PERF_RECORD_LOST) {
 			struct {
 				struct perf_event_header header;
@@ -272,10 +275,12 @@ static void perf_event_read(volatile struct perf_event_mmap_page *header, print_
 
 	__sync_synchronize(); // smp_mb()
 	header->data_tail = data_head;
+
+	return consumed;
 }
 
 
-extern void eventCb();
+extern int callback_to_go(void *, int, uint64_t);
 */
 import "C"
 
@@ -314,32 +319,6 @@ type BPFKProbePerf struct {
 	log    []byte
 	maps   map[string]*BPFMap
 	probes map[string]*BPFKProbe
-}
-
-func perfEventPoll(fds []C.int) error {
-	var pfds []C.struct_pollfd
-
-	for i, _ := range fds {
-		var pfd C.struct_pollfd
-
-		pfd.fd = fds[i]
-		pfd.events = C.POLLIN
-
-		pfds = append(pfds, pfd)
-	}
-	_, err := C.poll(&pfds[0], C.nfds_t(len(fds)), 1000)
-	if err != nil {
-		return fmt.Errorf("error polling: %v", err.(syscall.Errno))
-	}
-
-	return nil
-}
-
-//export eventCb
-func eventCb(data unsafe.Pointer, size C.int) {
-	b := C.GoBytes(data, size)
-
-	myEventCb(b)
 }
 
 func NewBpfPerfEvent(fileName string) *BPFKProbePerf {
@@ -715,19 +694,128 @@ func (b *BPFKProbePerf) Map(name string) *BPFMap {
 	return b.maps[name]
 }
 
-func (b *BPFKProbePerf) Poll(mapName string, cb EventCb) {
-	// TODO: do something like
-	// https://github.com/iovisor/gobpf/pull/2/files#diff-51d172d4e15a1a9ddb788f8eb973a93fR70
-	myEventCb = cb
+func perfEventPoll(fds []C.int) error {
+	var pfds []C.struct_pollfd
 
-	cpuCount := len(b.maps[mapName].pmuFDs)
+	for i, _ := range fds {
+		var pfd C.struct_pollfd
+
+		pfd.fd = fds[i]
+		pfd.events = C.POLLIN
+
+		pfds = append(pfds, pfd)
+	}
+	_, err := C.poll(&pfds[0], C.nfds_t(len(fds)), -1)
+	if err != nil {
+		return fmt.Errorf("error polling: %v", err.(syscall.Errno))
+	}
+
+	return nil
+}
+
+// Assume the timestamp is at the beginning of the user struct
+type BytesWithTimestamp [][]byte
+
+func (a BytesWithTimestamp) Len() int      { return len(a) }
+func (a BytesWithTimestamp) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a BytesWithTimestamp) Less(i, j int) bool {
+	return *(*C.uint64_t)(unsafe.Pointer(&a[i][0])) < *(*C.uint64_t)(unsafe.Pointer(&a[j][0]))
+}
+
+type callbackData struct {
+	b            *BPFKProbePerf
+	incoming     BytesWithTimestamp
+	receiverChan chan []byte
+}
+
+var callbackRegister = make(map[uint64]*callbackData)
+var callbackIndex uint64
+var mu sync.Mutex
+
+func registerCallback(data *callbackData) uint64 {
+	mu.Lock()
+	defer mu.Unlock()
+	callbackIndex++
+	for callbackRegister[callbackIndex] != nil {
+		callbackIndex++
+	}
+	callbackRegister[callbackIndex] = data
+	return callbackIndex
+}
+
+func unregisterCallback(i uint64) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(callbackRegister, i)
+}
+
+// Gateway function as required with CGO Go >= 1.6
+// "If a C-program wants a function pointer, a gateway function has to
+// be written. This is because we can't take the address of a Go
+// function and give that to C-code since the cgo tool will generate a
+// stub in C that should be called."
+//export callback_to_go
+func callback_to_go(data unsafe.Pointer, size C.int, callbackDataIndex C.uint64_t) C.int {
+	callbackData := callbackRegister[uint64(callbackDataIndex)]
+
+	b := C.GoBytes(data, size)
+
+	callbackData.incoming = append(callbackData.incoming, b)
+
+	return 1 // event consumed
+}
+
+// nowNanoseconds returns a time that can be compared to bpf_ktime_get_ns()
+func nowNanoseconds() uint64 {
+	var ts syscall.Timespec
+	syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&ts)), 0)
+	sec, nsec := ts.Unix()
+	return 1000*1000*1000*uint64(sec) + uint64(nsec)
+}
+
+func (b *BPFKProbePerf) PollStart(mapName string, receiverChan chan []byte) {
+	callbackData := &callbackData{
+		b:            b,
+		receiverChan: receiverChan,
+	}
+	callbackDataIndex := registerCallback(callbackData)
 
 	go func() {
+		cpuCount := len(b.maps[mapName].pmuFDs)
+
 		for {
 			perfEventPoll(b.maps[mapName].pmuFDs)
-			for cpu := 0; cpu < cpuCount; cpu++ {
-				C.perf_event_read(b.maps[mapName].headers[cpu], (*[0]byte)(C.eventCb))
+
+			for {
+				var harvestCount C.int
+				beforeHarvest := nowNanoseconds()
+				for cpu := 0; cpu < cpuCount; cpu++ {
+					harvestCount += C.perf_event_read(b.maps[mapName].headers[cpu],
+						(*[0]byte)(C.callback_to_go),
+						C.uint64_t(callbackDataIndex))
+				}
+
+				sort.Sort(callbackData.incoming)
+
+				for i := 0; i < len(callbackData.incoming); i++ {
+					if *(*uint64)(unsafe.Pointer(&callbackData.incoming[0][0])) > beforeHarvest {
+						// This record has been sent after the beginning of the harvest. Stop
+						// processing here to keep the order. "incoming" is sorted, so the next
+						// elements also must not be processed now.
+						break
+					}
+					receiverChan <- callbackData.incoming[0]
+					// remove first element
+					callbackData.incoming = callbackData.incoming[1:]
+				}
+				if harvestCount == 0 && len(callbackData.incoming) == 0 {
+					break
+				}
 			}
 		}
 	}()
+}
+
+func (b *BPFKProbePerf) PollStop(mapName string) {
+	// TODO
 }

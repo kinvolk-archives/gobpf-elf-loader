@@ -10,6 +10,8 @@
 #include <net/net_namespace.h>
 
 struct tcp_event_t {
+	u64 timestamp;
+	u64 cpu;
 	char ev_type[12];
 	u32 pid;
 	char comm[TASK_COMM_LEN];
@@ -71,6 +73,8 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 
 	// output
 	struct tcp_event_t evt = {
+		.timestamp = bpf_ktime_get_ns(),
+		.cpu = bpf_get_smp_processor_id(),
 		.ev_type = "connect",
 		.pid = pid >> 32,
 		.saddr = saddr,
