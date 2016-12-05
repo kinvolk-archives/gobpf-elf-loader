@@ -3,13 +3,15 @@
 #include <linux/ptrace.h>
 #include <linux/version.h>
 #include <linux/bpf.h>
-#include "../bpf_helpers.h"
+#include "bpf_helpers.h"
 
 #include <net/sock.h>
 #include <net/inet_sock.h>
 #include <net/net_namespace.h>
 
 struct tcp_event_t {
+	u64 timestamp;
+	u64 cpu;
 	char ev_type[12];
 	u32 pid;
 	char comm[TASK_COMM_LEN];
@@ -20,14 +22,14 @@ struct tcp_event_t {
 	u32 netns;
 };
 
-struct bpf_map_def SEC("maps") tcp_event = {
+struct bpf_map_def SEC("maps/tcp_event") tcp_event = {
 	.type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
 	.key_size = sizeof(int),
 	.value_size = sizeof(__u32),
 	.max_entries = 16,
 };
 
-struct bpf_map_def SEC("maps") connectsock = {
+struct bpf_map_def SEC("maps/connectsock") connectsock = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u64),
 	.value_size = sizeof(void *),
@@ -71,6 +73,8 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 
 	// output
 	struct tcp_event_t evt = {
+		.timestamp = bpf_ktime_get_ns(),
+		.cpu = bpf_get_smp_processor_id(),
 		.ev_type = "connect",
 		.pid = pid >> 32,
 		.saddr = saddr,
