@@ -14,12 +14,34 @@ import (
 
 import "C"
 
-type tcpEvent struct {
+type EventType uint32
+
+const (
+	_ EventType = iota
+	EventConnect
+	EventAccept
+	EventClose
+)
+
+func (e EventType) String() string {
+	switch e {
+	case EventConnect:
+		return "connect"
+	case EventAccept:
+		return "accept"
+	case EventClose:
+		return "close"
+	default:
+		return "unknown"
+	}
+}
+
+type tcpEventV4 struct {
 	// Timestamp must be the first field, the sorting depends on it
 	Timestamp uint64
 
 	Cpu   uint64
-	Type  [12]C.char
+	Type  uint32
 	Pid   uint32
 	Comm  [16]C.char
 	SAddr uint32
@@ -27,6 +49,23 @@ type tcpEvent struct {
 	SPort uint16
 	DPort uint16
 	NetNS uint32
+}
+
+type tcpEventV6 struct {
+	// Timestamp must be the first field, the sorting depends on it
+	Timestamp uint64
+
+	Cpu    uint64
+	Type   uint32
+	Pid    uint32
+	Comm   [16]C.char
+	SAddrH uint64
+	SAddrL uint64
+	DAddrH uint64
+	DAddrL uint64
+	SPort  uint16
+	DPort  uint16
+	NetNS  uint32
 }
 
 var byteOrder binary.ByteOrder
@@ -44,12 +83,13 @@ func init() {
 	}
 }
 
-var lastTimestamp uint64
+var lastTimestampV4 uint64
+var lastTimestampV6 uint64
 
-func tcpEventCb(event tcpEvent) {
+func tcpEventCbV4(event tcpEventV4) {
 	timestamp := uint64(event.Timestamp)
 	cpu := event.Cpu
-	typ := C.GoString(&event.Type[0])
+	typ := EventType(event.Type)
 	pid := event.Pid & 0xffffffff
 
 	saddrbuf := make([]byte, 4)
@@ -67,12 +107,43 @@ func tcpEventCb(event tcpEvent) {
 
 	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
 
-	if lastTimestamp > timestamp {
-		fmt.Printf("WARNING: late event!\n")
+	if lastTimestampV4 > timestamp {
+		fmt.Printf("ERROR: late event!\n")
 		os.Exit(1)
 	}
 
-	lastTimestamp = timestamp
+	lastTimestampV4 = timestamp
+}
+
+func tcpEventCbV6(event tcpEventV6) {
+	timestamp := uint64(event.Timestamp)
+	cpu := event.Cpu
+	typ := EventType(event.Type)
+	pid := event.Pid & 0xffffffff
+
+	saddrbuf := make([]byte, 16)
+	daddrbuf := make([]byte, 16)
+
+	binary.LittleEndian.PutUint64(saddrbuf, event.SAddrH)
+	binary.LittleEndian.PutUint64(saddrbuf[4:], event.SAddrL)
+	binary.LittleEndian.PutUint64(daddrbuf, event.DAddrH)
+	binary.LittleEndian.PutUint64(daddrbuf[4:], event.DAddrL)
+
+	sIP := net.IP(saddrbuf)
+	dIP := net.IP(daddrbuf)
+
+	sport := event.SPort
+	dport := event.DPort
+	netns := event.NetNS
+
+	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
+
+	if lastTimestampV6 > timestamp {
+		fmt.Printf("ERROR: late event!\n")
+		os.Exit(1)
+	}
+
+	lastTimestampV6 = timestamp
 }
 
 func main() {
@@ -91,25 +162,41 @@ func main() {
 
 	fmt.Printf("Ready.\n")
 
-	channel := make(chan []byte)
+	channelV4 := make(chan []byte)
+	channelV6 := make(chan []byte)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 
 	go func() {
-		var event tcpEvent
+		var event tcpEventV4
 		for {
-			data := <-channel
+			data := <-channelV4
 			err := binary.Read(bytes.NewBuffer(data), byteOrder, &event)
 			if err != nil {
 				fmt.Printf("failed to decode received data: %s\n", err)
 				continue
 			}
-			tcpEventCb(event)
+			tcpEventCbV4(event)
 		}
 	}()
 
-	b.PollStart("tcp_event", channel)
+	go func() {
+		var event tcpEventV6
+		for {
+			data := <-channelV6
+			err := binary.Read(bytes.NewBuffer(data), byteOrder, &event)
+			if err != nil {
+				fmt.Printf("failed to decode received data: %s\n", err)
+				continue
+			}
+			tcpEventCbV6(event)
+		}
+	}()
+
+	b.PollStart("tcp_event_v4", channelV4)
+	b.PollStart("tcp_event_v6", channelV6)
 	<-sig
-	b.PollStop("tcp_event")
+	b.PollStop("tcp_event_v4")
+	b.PollStop("tcp_event_v6")
 }
