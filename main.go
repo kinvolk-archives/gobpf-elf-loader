@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"unsafe"
 
-	bpf "github.com/kinvolk/go-ebpf-kprobe-example/bpf"
+	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
 )
 
 import "C"
