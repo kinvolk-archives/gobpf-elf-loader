@@ -780,6 +780,14 @@ func (b *BPFKProbePerf) PollStart(mapName string, receiverChan chan []byte) {
 	}
 	callbackDataIndex := registerCallback(callbackData)
 
+	if _, ok := b.maps[mapName]; !ok {
+		fmt.Fprintf(os.Stderr, "Cannot find map %q. List of found maps:\n", mapName)
+		for key, _ := range b.maps {
+			fmt.Fprintf(os.Stderr, "%q\n", key)
+		}
+		os.Exit(1)
+	}
+
 	go func() {
 		cpuCount := len(b.maps[mapName].pmuFDs)
 

@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"unsafe"
 
-	bpf "github.com/kinvolk/go-ebpf-kprobe-example/bpf"
+	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
 )
 
 import "C"
@@ -76,7 +76,12 @@ func tcpEventCb(event tcpEvent) {
 }
 
 func main() {
-	b := bpf.NewBpfPerfEvent("kernel/trace_output_kern.o")
+	if len(os.Args) != 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s ${GOPATH}/src/github.com/kinvolk/tcptracer-bpf/ebpf/${DISTRO}/x86_64/$(uname -r)/ebpf.o\n", os.Args[0])
+		os.Exit(1)
+	}
+	fileName := os.Args[1]
+	b := bpf.NewBpfPerfEvent(fileName)
 
 	err := b.Load()
 	if err != nil {
