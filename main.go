@@ -152,6 +152,10 @@ func main() {
 	}
 	fileName := os.Args[1]
 	b := bpf.NewBpfPerfEvent(fileName)
+	if b == nil {
+		fmt.Fprintf(os.Stderr, "System doesn't support BPF\n")
+		os.Exit(1)
+	}
 
 	err := b.Load()
 	if err != nil {
