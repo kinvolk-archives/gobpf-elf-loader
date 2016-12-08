@@ -12,8 +12,6 @@ import (
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
 )
 
-import "C"
-
 type EventType uint32
 
 const (
@@ -43,7 +41,7 @@ type tcpEventV4 struct {
 	Cpu   uint64
 	Type  uint32
 	Pid   uint32
-	Comm  [16]C.char
+	Comm  [16]byte
 	SAddr uint32
 	DAddr uint32
 	SPort uint16
@@ -58,7 +56,7 @@ type tcpEventV6 struct {
 	Cpu    uint64
 	Type   uint32
 	Pid    uint32
-	Comm   [16]C.char
+	Comm   [16]byte
 	SAddrH uint64
 	SAddrL uint64
 	DAddrH uint64
@@ -91,6 +89,7 @@ func tcpEventCbV4(event tcpEventV4) {
 	cpu := event.Cpu
 	typ := EventType(event.Type)
 	pid := event.Pid & 0xffffffff
+	comm := string(event.Comm[:bytes.IndexByte(event.Comm[:], 0)])
 
 	saddrbuf := make([]byte, 4)
 	daddrbuf := make([]byte, 4)
@@ -105,7 +104,7 @@ func tcpEventCbV4(event tcpEventV4) {
 	dport := event.DPort
 	netns := event.NetNS
 
-	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
+	fmt.Printf("%v cpu#%d %s %v %q %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, comm, sIP, sport, dIP, dport, netns)
 
 	if lastTimestampV4 > timestamp {
 		fmt.Printf("ERROR: late event!\n")
@@ -153,6 +152,10 @@ func main() {
 	}
 	fileName := os.Args[1]
 	b := bpf.NewBpfPerfEvent(fileName)
+	if b == nil {
+		fmt.Fprintf(os.Stderr, "System doesn't support BPF\n")
+		os.Exit(1)
+	}
 
 	err := b.Load()
 	if err != nil {
