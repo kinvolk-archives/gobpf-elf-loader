@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
@@ -124,9 +129,9 @@ func tcpEventCbV6(event tcpEventV6) {
 	daddrbuf := make([]byte, 16)
 
 	binary.LittleEndian.PutUint64(saddrbuf, event.SAddrH)
-	binary.LittleEndian.PutUint64(saddrbuf[4:], event.SAddrL)
+	binary.LittleEndian.PutUint64(saddrbuf[8:], event.SAddrL)
 	binary.LittleEndian.PutUint64(daddrbuf, event.DAddrH)
-	binary.LittleEndian.PutUint64(daddrbuf[4:], event.DAddrL)
+	binary.LittleEndian.PutUint64(daddrbuf[8:], event.DAddrL)
 
 	sIP := net.IP(saddrbuf)
 	dIP := net.IP(daddrbuf)
@@ -135,7 +140,7 @@ func tcpEventCbV6(event tcpEventV6) {
 	dport := event.DPort
 	netns := event.NetNS
 
-	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
+	fmt.Printf("%v cpu#%d %s %v [%v]:%v [%v]:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
 
 	if lastTimestampV6 > timestamp {
 		fmt.Printf("ERROR: late event!\n")
@@ -143,6 +148,262 @@ func tcpEventCbV6(event tcpEventV6) {
 	}
 
 	lastTimestampV6 = timestamp
+}
+
+type tcpTracerState uint64
+
+const (
+	Uninitialized tcpTracerState = iota
+	Checking
+	Checked
+	Ready
+)
+
+type GuessWhat uint64
+
+const (
+	GuessSaddr GuessWhat = iota
+	GuessDaddr
+	GuessSport
+	GuessDport
+	GuessNetns
+	GuessFamily
+	GuessDaddrIPv6
+)
+
+type tcpTracerStatus struct {
+	status          tcpTracerState
+	pidTgid         uint64
+	what            GuessWhat
+	offsetSaddr     uint64
+	offsetDaddr     uint64
+	offsetSport     uint64
+	offsetDport     uint64
+	offsetNetns     uint64
+	offsetIno       uint64
+	offsetFamily    uint64
+	offsetDaddrIPv6 uint64
+	err             byte
+	saddr           uint32
+	daddr           uint32
+	sport           uint16
+	dport           uint16
+	netns           uint32
+	family          uint16
+	daddrIPv6       [4]uint32
+}
+
+func listen(url, netType string) {
+	l, err := net.Listen(netType, url)
+	if err != nil {
+		fmt.Println("Error listening:", err.Error())
+		os.Exit(1)
+	}
+	fmt.Println("Listening on " + url)
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting: ", err.Error())
+			os.Exit(1)
+		}
+		conn.Close()
+	}
+}
+
+func compareIPv6(a, b [4]uint32) bool {
+	for i := 0; i < 4; i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func ownNetNS() (uint64, error) {
+	var s syscall.Stat_t
+	if err := syscall.Stat("/proc/self/ns/net", &s); err != nil {
+		return 0, err
+	}
+	return s.Ino, nil
+}
+
+func IPFromUint32Arr(ipv6Addr [4]uint32) net.IP {
+	buf := make([]byte, 16)
+	for i := 0; i < 16; i++ {
+		buf[i] = *(*byte)(unsafe.Pointer((uintptr(unsafe.Pointer(&ipv6Addr[0])) + uintptr(i))))
+	}
+	return net.IP(buf)
+}
+
+func guessOffsets(b *bpf.BPFKProbePerf) error {
+	listenIP := "127.0.0.2"
+	listenPort := uint16(9091)
+	bindAddress := fmt.Sprintf("%s:%d", listenIP, listenPort)
+
+	go listen(bindAddress, "tcp4")
+	time.Sleep(300 * time.Millisecond)
+
+	currentNetns, err := ownNetNS()
+	if err != nil {
+		return fmt.Errorf("error getting current netns: %v", err)
+		os.Exit(1)
+	}
+
+	mp := b.Map("tcptracer_status")
+
+	var zero uint64
+	pidTgid := uint64(os.Getpid()<<32 | syscall.Gettid())
+
+	status := tcpTracerStatus{
+		status:  Checking,
+		pidTgid: pidTgid,
+	}
+
+	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	if err != nil {
+		return fmt.Errorf("error: %v", err)
+	}
+
+	// convert to network endianness
+	arr := make([]byte, 2)
+	binary.BigEndian.PutUint16(arr, listenPort)
+	dport := byteOrder.Uint16(arr)
+
+	// 127.0.0.1
+	saddr := 0x0100007F
+	// 127.0.0.2
+	daddr := 0x0200007F
+	// will be set later
+	sport := 0
+	netns := uint32(currentNetns)
+	family := syscall.AF_INET
+
+	for status.status != Ready {
+		var daddrIPv6 [4]uint32
+
+		daddrIPv6[0] = rand.Uint32()
+		daddrIPv6[1] = rand.Uint32()
+		daddrIPv6[2] = rand.Uint32()
+		daddrIPv6[3] = rand.Uint32()
+
+		ip := IPFromUint32Arr(daddrIPv6)
+
+		if status.what != GuessDaddrIPv6 {
+			conn, err := net.Dial("tcp4", bindAddress)
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+			}
+
+			sport, err = strconv.Atoi(strings.Split(conn.LocalAddr().String(), ":")[1])
+			if err != nil {
+				return fmt.Errorf("error: %v", err)
+			}
+			conn.Close()
+		} else {
+			conn, err := net.Dial("tcp6", fmt.Sprintf("[%s]:9092", ip))
+			if err == nil {
+				conn.Close()
+			}
+		}
+
+		err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
+		}
+
+		if status.status == Checked {
+			switch status.what {
+			case GuessSaddr:
+				if status.saddr == uint32(saddr) {
+					fmt.Println("offsetSaddr found:", status.offsetSaddr)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetSaddr++
+					status.status = Checking
+					status.saddr = uint32(saddr)
+				}
+			case GuessDaddr:
+				if status.daddr == uint32(daddr) {
+					fmt.Println("offsetDaddr found:", status.offsetDaddr)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetDaddr++
+					status.status = Checking
+					status.daddr = uint32(daddr)
+				}
+			case GuessSport:
+				if status.sport == uint16(sport) {
+					fmt.Println("offsetSport found:", status.offsetSport)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetSport++
+					status.status = Checking
+				}
+			case GuessDport:
+				if status.dport == dport {
+					fmt.Println("offsetDport found:", status.offsetDport)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetDport++
+					status.status = Checking
+				}
+			case GuessNetns:
+				if status.netns == netns {
+					fmt.Println("offsetNetns found:", status.offsetNetns)
+					fmt.Println("offsetIno found:", status.offsetIno)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetIno++
+					// go to the next offsetNetns if we get an error
+					if status.err != 0 || status.offsetIno >= 200 {
+						status.offsetIno = 0
+						status.offsetNetns++
+					}
+					status.status = Checking
+				}
+			case GuessFamily:
+				if status.family == uint16(family) {
+					fmt.Println("offsetFamily found:", status.offsetFamily)
+					status.what++
+					status.status = Checking
+				} else {
+					status.offsetFamily++
+					status.status = Checking
+				}
+			case GuessDaddrIPv6:
+				if compareIPv6(status.daddrIPv6, daddrIPv6) {
+					fmt.Println("offsetDaddrIPv6 found:", status.offsetDaddrIPv6)
+					status.what++
+					status.status = Ready
+				} else {
+					status.offsetDaddrIPv6++
+					status.status = Checking
+				}
+			default:
+				return fmt.Errorf("Uh, oh!")
+			}
+		}
+
+		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
+		}
+
+		if status.offsetSaddr >= 200 || status.offsetDaddr >= 200 ||
+			status.offsetSport >= 200 || status.offsetDport >= 200 ||
+			status.offsetNetns >= 200 || status.offsetFamily >= 200 ||
+			status.offsetDaddrIPv6 >= 200 {
+			fmt.Fprintf(os.Stderr, "overflow, bailing out!\n")
+			os.Exit(1)
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -159,6 +420,11 @@ func main() {
 
 	err := b.Load()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	if err := guessOffsets(b); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
