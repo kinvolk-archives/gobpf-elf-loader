@@ -197,9 +197,9 @@ func main() {
 		}
 	}()
 
-	b.PollStart("tcp_event_v4", channelV4)
-	b.PollStart("tcp_event_v6", channelV6)
+	b.PollStart("tcp_event_ipv4", channelV4)
+	b.PollStart("tcp_event_ipv6", channelV6)
 	<-sig
-	b.PollStop("tcp_event_v4")
-	b.PollStop("tcp_event_v6")
+	b.PollStop("tcp_event_ipv4")
+	b.PollStop("tcp_event_ipv6")
 }
