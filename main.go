@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
@@ -176,19 +175,26 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	mp := b.Map("tcptracer_status")
 	fmt.Println(mp)
 
+	//dummyIP := net.IPv4(192, 16, 90, 10)
+
+	var pid_tgid uint64
+	pid_tgid = uint64(os.Getpid()<<32 | syscall.Gettid())
+	fmt.Println(pid_tgid)
+
 	var zero uint64
 	zero = 0
-	status := tcpTracerStatus{
-		status: 0,
 
-		pid_tgid:     1,
-		what:         2,
-		offset_saddr: 3,
-		saddr:        4,
-		daddr:        5,
-		sport:        6,
-		dport:        7,
-		netns:        8,
+	status := tcpTracerStatus{
+		status: 1,
+
+		pid_tgid:     pid_tgid,
+		what:         0,
+		offset_saddr: 0,
+		saddr:        0x0100007F,
+		daddr:        99,
+		sport:        99,
+		dport:        99,
+		netns:        99,
 	}
 
 	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
@@ -196,14 +202,27 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		return fmt.Errorf("error: %v", err)
 	}
 
-	time.Sleep(10 * time.Second)
+	for {
+		_, err = net.Dial("tcp", "127.0.0.2:80")
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+		}
 
-	err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
-	if err != nil {
-		return fmt.Errorf("error: %v", err)
+		err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
+		}
+
+		if status.status == 2 {
+			fmt.Println("offset found:", status.offset_saddr)
+			os.Exit(0)
+		}
+
+		if status.offset_saddr >= 10 {
+			fmt.Println("overflow!")
+			os.Exit(1)
+		}
 	}
-
-	fmt.Println("LOOKUP:", status.offset_saddr)
 
 	// for status != READY {
 	//   known_tuple = { whatever }
