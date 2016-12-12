@@ -160,7 +160,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 
 	fmt.Println(s.Ino)
 
-	mp := b.Map("maps/tcptracer_status")
+	mp := b.Map("tcptracer_status")
 	fmt.Println(mp)
 
 	// for status != READY {
