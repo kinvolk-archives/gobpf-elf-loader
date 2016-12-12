@@ -7,9 +7,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"syscall"
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
+	"github.com/vishvananda/netns"
 )
 
 type EventType uint32
@@ -145,6 +147,42 @@ func tcpEventCbV6(event tcpEventV6) {
 	lastTimestampV6 = timestamp
 }
 
+func guessWhat(b *bpf.BPFKProbePerf) error {
+	currentNetns, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("error getting current netns: %v", err)
+		os.Exit(1)
+	}
+	var s syscall.Stat_t
+	if err := syscall.Fstat(int(currentNetns), &s); err != nil {
+		return fmt.Errorf("NS(%d: unknown)", currentNetns)
+	}
+
+	fmt.Println(s.Ino)
+
+	mp := b.Map("maps/tcptracer_status")
+	fmt.Println(mp)
+
+	// for status != READY {
+	//   known_tuple = { whatever }
+	//   generate connection with known_tuple
+	//   for status != CHECKED {
+	//     sleep
+	//   }
+	//   tuple = get_tuple()
+	//   if tuple[what] == known_tuple[what]
+	//     if what == len(what)
+	//       state = READY
+	//     else
+	//       what++
+	//       offset = 0
+	//   else
+	//     offset++
+	// }
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s ${GOPATH}/src/github.com/kinvolk/tcptracer-bpf/ebpf/${DISTRO}/x86_64/$(uname -r)/ebpf.o\n", os.Args[0])
@@ -159,6 +197,11 @@ func main() {
 
 	err := b.Load()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	if err := guessWhat(b); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
