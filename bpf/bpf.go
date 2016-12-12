@@ -624,9 +624,9 @@ func (b *BPFKProbePerf) Load() error {
 			}
 
 			// assign perf fd tp map
-			ret := C.bpf_update_element(C.int(b.maps[name].m.fd), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
-			if ret != 0 {
-				fmt.Fprintf(os.Stderr, "warning: cannot assign perf fd to map: %d (cpu %d)\n", syscall.Errno(ret), cpu)
+			_, err = C.bpf_update_element(C.int(b.maps[name].m.fd), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cannot assign perf fd to map %q: %s (cpu %d)\n", name, err, cpu)
 			}
 
 			b.maps[name].pmuFDs = append(b.maps[name].pmuFDs, pmuFD)
