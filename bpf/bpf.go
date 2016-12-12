@@ -277,12 +277,34 @@ static int perf_event_read(int page_count, int page_size, void *_state,
 
 	return e->header.type;
 }
+
+static void create_bpf_update_elem(int fd, void *key, void *value,
+			    unsigned long long flags, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+	ptr_bpf_attr->value = ptr_to_u64(value);
+	ptr_bpf_attr->flags = flags;
+}
+
+static void create_bpf_lookup_elem(int fd, void *key, void *value, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+	ptr_bpf_attr->value = ptr_to_u64(value);
+}
 */
 import "C"
 
 type EventCb func([]byte)
 
 var myEventCb EventCb
+
+const useCurrentKernelVersion = 0xFFFFFFFE
 
 // BPFMap represents a eBPF map. An eBPF map has to be declared in the C file
 type BPFMap struct {
@@ -326,6 +348,61 @@ func NewBpfPerfEvent(fileName string) *BPFKProbePerf {
 	}
 }
 
+func UpdateElementReal(fd int, key, value unsafe.Pointer, flags uint64) error {
+	uba := C.union_bpf_attr{}
+	C.create_bpf_update_elem(
+		C.int(fd),
+		key,
+		value,
+		C.ulonglong(flags),
+		unsafe.Pointer(&uba),
+	)
+	ret, _, err := syscall.Syscall(
+		C.__NR_bpf,
+		C.BPF_MAP_UPDATE_ELEM,
+		uintptr(unsafe.Pointer(&uba)),
+		unsafe.Sizeof(uba),
+	)
+
+	if ret != 0 || err != 0 {
+		return fmt.Errorf("Unable to update element: %s", err)
+	}
+
+	return nil
+}
+
+func (b *BPFKProbePerf) UpdateElement(mp *BPFMap, key, value unsafe.Pointer) error {
+	return UpdateElementReal(int(mp.m.fd), key, value, 0)
+}
+
+// LookupElementReal looks up for the map value stored in fd with the given key. The value
+// is stored in the value unsafe.Pointer.
+func LookupElementReal(fd int, key, value unsafe.Pointer) error {
+	uba := C.union_bpf_attr{}
+	C.create_bpf_lookup_elem(
+		C.int(fd),
+		key,
+		value,
+		unsafe.Pointer(&uba),
+	)
+	ret, _, err := syscall.Syscall(
+		C.__NR_bpf,
+		C.BPF_MAP_LOOKUP_ELEM,
+		uintptr(unsafe.Pointer(&uba)),
+		unsafe.Sizeof(uba),
+	)
+
+	if ret != 0 || err != 0 {
+		return fmt.Errorf("Unable to lookup element: %s", err)
+	}
+
+	return nil
+}
+
+func (b *BPFKProbePerf) LookupElement(mp *BPFMap, key, value unsafe.Pointer) error {
+	return LookupElementReal(int(mp.m.fd), key, value)
+}
+
 // from https://github.com/safchain/goebpf
 // Apache License
 
@@ -358,6 +435,54 @@ func (b *BPFKProbePerf) readVersion() (int, error) {
 	}
 
 	return 0, nil
+}
+
+func utsnameStr(in []int8) string {
+	out := make([]byte, len(in))
+
+	for i := 0; i < len(in); i++ {
+		if in[i] == 0 {
+			break
+		}
+		out = append(out, byte(in[i]))
+	}
+
+	return string(out)
+}
+
+func currentVersion() (int, error) {
+	var buf syscall.Utsname
+	if err := syscall.Uname(&buf); err != nil {
+		return -1, err
+	}
+
+	releaseStr := strings.Trim(utsnameStr(buf.Release[:]), "\x00")
+
+	kernelVersionStr := strings.Split(releaseStr, "-")[0]
+
+	kernelVersionParts := strings.Split(kernelVersionStr, ".")
+	if len(kernelVersionParts) != 3 {
+		return -1, errors.New("not enough version information")
+	}
+
+	major, err := strconv.Atoi(kernelVersionParts[0])
+	if err != nil {
+		return -1, err
+	}
+
+	minor, err := strconv.Atoi(kernelVersionParts[1])
+	if err != nil {
+		return -1, err
+	}
+
+	patch, err := strconv.Atoi(kernelVersionParts[2])
+	if err != nil {
+		return -1, err
+	}
+
+	out := major*256*256 + minor*256 + patch
+
+	return out, nil
 }
 
 func (b *BPFKProbePerf) readMaps() error {
@@ -489,6 +614,12 @@ func (b *BPFKProbePerf) Load() error {
 	if err != nil {
 		return err
 	}
+	if version == useCurrentKernelVersion {
+		version, err = currentVersion()
+		if err != nil {
+			return err
+		}
+	}
 
 	err = b.readMaps()
 	if err != nil {
@@ -619,9 +750,9 @@ func (b *BPFKProbePerf) Load() error {
 			}
 
 			// assign perf fd tp map
-			ret := C.bpf_update_element(C.int(b.maps[name].m.fd), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
-			if ret != 0 {
-				return fmt.Errorf("cannot assign perf fd to map: %d (cpu %d)", syscall.Errno(ret), cpu)
+			_, err = C.bpf_update_element(C.int(b.maps[name].m.fd), unsafe.Pointer(&cpu), unsafe.Pointer(&pmuFD), C.BPF_ANY)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cannot assign perf fd to map %q: %s (cpu %d)\n", name, err, cpu)
 			}
 
 			b.maps[name].pmuFDs = append(b.maps[name].pmuFDs, pmuFD)
