@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
@@ -147,6 +148,20 @@ func tcpEventCbV6(event tcpEventV6) {
 	lastTimestampV6 = timestamp
 }
 
+type tcpTracerStatus struct {
+	status uint64
+
+	pid_tgid     uint64
+	what         uint64
+	offset_saddr uint64
+
+	saddr uint32
+	daddr uint32
+	sport uint16
+	dport uint16
+	netns uint32
+}
+
 func guessWhat(b *bpf.BPFKProbePerf) error {
 	currentNetns, err := netns.Get()
 	if err != nil {
@@ -158,10 +173,37 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		return fmt.Errorf("NS(%d: unknown)", currentNetns)
 	}
 
-	fmt.Println(s.Ino)
-
 	mp := b.Map("tcptracer_status")
 	fmt.Println(mp)
+
+	var zero uint64
+	zero = 0
+	status := tcpTracerStatus{
+		status: 0,
+
+		pid_tgid:     1,
+		what:         2,
+		offset_saddr: 3,
+		saddr:        4,
+		daddr:        5,
+		sport:        6,
+		dport:        7,
+		netns:        8,
+	}
+
+	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	if err != nil {
+		return fmt.Errorf("error: %v", err)
+	}
+
+	time.Sleep(10 * time.Second)
+
+	err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	if err != nil {
+		return fmt.Errorf("error: %v", err)
+	}
+
+	fmt.Println("LOOKUP:", status.offset_saddr)
 
 	// for status != READY {
 	//   known_tuple = { whatever }

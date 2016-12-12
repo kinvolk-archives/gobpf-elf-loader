@@ -281,6 +281,68 @@ static int perf_event_read(volatile struct perf_event_mmap_page *header, consume
 	return consumed;
 }
 
+static void create_bpf_create_map(enum bpf_map_type map_type, int key_size, int value_size,
+			   int max_entries, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_type = map_type;
+	ptr_bpf_attr->key_size = key_size;
+	ptr_bpf_attr->value_size = value_size;
+	ptr_bpf_attr->max_entries = max_entries;
+}
+
+static void create_bpf_update_elem(int fd, void *key, void *value,
+			    unsigned long long flags, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+	ptr_bpf_attr->value = ptr_to_u64(value);
+	ptr_bpf_attr->flags = flags;
+}
+
+static void create_bpf_lookup_elem(int fd, void *key, void *value, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+	ptr_bpf_attr->value = ptr_to_u64(value);
+}
+
+static void create_bpf_delete_elem(int fd, void *key, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+}
+
+static void create_bpf_get_next_key(int fd, void *key, void *next_key, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->map_fd = fd;
+	ptr_bpf_attr->key = ptr_to_u64(key);
+	ptr_bpf_attr->next_key = ptr_to_u64(next_key);
+}
+
+static void create_bpf_obj_pin(int fd, char *pathname, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->pathname = ptr_to_u64(pathname);
+	ptr_bpf_attr->bpf_fd = fd;
+}
+
+static void create_bpf_obj_get(char *pathname, void *attr)
+{
+	union bpf_attr* ptr_bpf_attr;
+	ptr_bpf_attr = (union bpf_attr*)attr;
+	ptr_bpf_attr->pathname = ptr_to_u64(pathname);
+}
 
 extern int callback_to_go(void *, int, uint64_t);
 */
@@ -330,6 +392,61 @@ func NewBpfPerfEvent(fileName string) *BPFKProbePerf {
 		probes:   make(map[string]*BPFKProbe),
 		log:      make([]byte, 65536),
 	}
+}
+
+func UpdateElementReal(fd int, key, value unsafe.Pointer, flags uint64) error {
+	uba := C.union_bpf_attr{}
+	C.create_bpf_update_elem(
+		C.int(fd),
+		key,
+		value,
+		C.ulonglong(flags),
+		unsafe.Pointer(&uba),
+	)
+	ret, _, err := syscall.Syscall(
+		C.__NR_bpf,
+		C.BPF_MAP_UPDATE_ELEM,
+		uintptr(unsafe.Pointer(&uba)),
+		unsafe.Sizeof(uba),
+	)
+
+	if ret != 0 || err != 0 {
+		return fmt.Errorf("Unable to update element: %s", err)
+	}
+
+	return nil
+}
+
+func (b *BPFKProbePerf) UpdateElement(mp *BPFMap, key, value unsafe.Pointer) error {
+	return UpdateElementReal(int(mp.m.fd), key, value, 0)
+}
+
+// LookupElementReal looks up for the map value stored in fd with the given key. The value
+// is stored in the value unsafe.Pointer.
+func LookupElementReal(fd int, key, value unsafe.Pointer) error {
+	uba := C.union_bpf_attr{}
+	C.create_bpf_lookup_elem(
+		C.int(fd),
+		key,
+		value,
+		unsafe.Pointer(&uba),
+	)
+	ret, _, err := syscall.Syscall(
+		C.__NR_bpf,
+		C.BPF_MAP_LOOKUP_ELEM,
+		uintptr(unsafe.Pointer(&uba)),
+		unsafe.Sizeof(uba),
+	)
+
+	if ret != 0 || err != 0 {
+		return fmt.Errorf("Unable to lookup element: %s", err)
+	}
+
+	return nil
+}
+
+func (b *BPFKProbePerf) LookupElement(mp *BPFMap, key, value unsafe.Pointer) error {
+	return LookupElementReal(int(mp.m.fd), key, value)
 }
 
 // from https://github.com/safchain/goebpf
