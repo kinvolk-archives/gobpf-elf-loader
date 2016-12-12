@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -37,7 +36,7 @@ import (
 #include <sys/resource.h>
 
 // from https://github.com/safchain/goebpf
-// Apache License
+// Apache License, Version 2.0
 
 // bpf map structure used by C program to define maps and
 // used by elf loader.
@@ -211,78 +210,73 @@ static int perf_event_open_tracepoint(int tracepoint_id, int pid, int cpu,
                       group_fd, flags);
 }
 
-#define PAGE_COUNT 8
+// from https://github.com/cilium/cilium/blob/master/pkg/bpf/perf.go
+// Apache License, Version 2.0
 
-typedef int (*consume_fn)(void *data, int size, int callbackIndex);
-
-struct perf_event_sample {
+struct event_sample {
 	struct perf_event_header header;
-	__u32 size;
-	char data[];
+	uint32_t size;
+	uint8_t data[];
 };
 
-static int perf_event_read(volatile struct perf_event_mmap_page *header, consume_fn fn, uint64_t callback_data_index)
+struct read_state {
+	void *buf;
+	int buf_len;
+};
+
+static int perf_event_read(int page_count, int page_size, void *_state,
+		    void *_header, void *_sample_ptr, void *_lost_ptr)
 {
-	int consumed = 0;
-	int page_size;
-	page_size = getpagesize();
+	volatile struct perf_event_mmap_page *header = _header;
+	uint64_t data_head = *((volatile uint64_t *) &header->data_head);
+	uint64_t data_tail = header->data_tail;
+	uint64_t raw_size = (uint64_t)page_count * page_size;
+	void *base  = ((uint8_t *)header) + page_size;
+	struct read_state *state = _state;
+	struct event_sample *e;
+	void *begin, *end;
+	void **sample_ptr = (void **) _sample_ptr;
+	void **lost_ptr = (void **) _lost_ptr;
 
-	__u64 data_tail = header->data_tail;
-	__u64 data_head = header->data_head;
-	__u64 buffer_size = PAGE_COUNT * page_size;
-	void *base, *begin, *end;
-	char buf[256];
-
-	asm volatile("" ::: "memory"); // in real code it should be smp_rmb()
+	// No data to read on this ring
+	__sync_synchronize();
 	if (data_head == data_tail)
 		return 0;
 
-	base = ((char *)header) + page_size;
+	begin = base + data_tail % raw_size;
+	e = begin;
+	end = base + (data_tail + e->header.size) % raw_size;
 
-	begin = base + data_tail % buffer_size;
-	end = base + data_head % buffer_size;
-
-	while (begin != end) {
-		struct perf_event_sample *e;
-
-		e = begin;
-		if (begin + e->header.size > base + buffer_size) {
-			long len = base + buffer_size - begin;
-
-			assert(len < e->header.size);
-			memcpy(buf, begin, len);
-			memcpy(buf + len, base, e->header.size - len);
-			e = (void *) buf;
-			begin = base + e->header.size - len;
-		} else if (begin + e->header.size == base + buffer_size) {
-			begin = base;
-		} else {
-			begin += e->header.size;
-		}
-
-		if (e->header.type == PERF_RECORD_SAMPLE) {
-			consumed = fn(e->data, e->size, callback_data_index) || consumed;
-		} else if (e->header.type == PERF_RECORD_LOST) {
-			struct {
-				struct perf_event_header header;
-				__u64 id;
-				__u64 lost;
-			} *lost = (void *) e;
-			printf("lost %lld events\n", lost->lost);
-		} else {
-			printf("unknown event type=%d size=%d\n",
-			       e->header.type, e->header.size);
-		}
+	if (state->buf_len < e->header.size || !state->buf) {
+		state->buf = realloc(state->buf, e->header.size);
+		state->buf_len = e->header.size;
 	}
 
-	__sync_synchronize(); // smp_mb()
-	header->data_tail = data_head;
+	if (end < begin) {
+		uint64_t len = base + raw_size - begin;
 
-	return consumed;
+		memcpy(state->buf, begin, len);
+		memcpy((char *) state->buf + len, base, e->header.size - len);
+
+		e = state->buf;
+	} else {
+		memcpy(state->buf, begin, e->header.size);
+	}
+
+	switch (e->header.type) {
+	case PERF_RECORD_SAMPLE:
+		*sample_ptr = state->buf;
+		break;
+	case PERF_RECORD_LOST:
+		*lost_ptr = state->buf;
+		break;
+	}
+
+	__sync_synchronize();
+	header->data_tail += e->header.size;
+
+	return e->header.type;
 }
-
-
-extern int callback_to_go(void *, int, uint64_t);
 */
 import "C"
 
@@ -610,7 +604,8 @@ func (b *BPFKProbePerf) Load() error {
 
 			// mmap
 			pageSize := os.Getpagesize()
-			mmapSize := pageSize * (C.PAGE_COUNT + 1)
+			pageCount := 8
+			mmapSize := pageSize * (pageCount + 1)
 
 			base, err := syscall.Mmap(int(pmuFD), 0, mmapSize, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 			if err != nil {
@@ -724,47 +719,25 @@ func (a BytesWithTimestamp) Less(i, j int) bool {
 	return *(*C.uint64_t)(unsafe.Pointer(&a[i][0])) < *(*C.uint64_t)(unsafe.Pointer(&a[j][0]))
 }
 
-type callbackData struct {
-	b            *BPFKProbePerf
-	incoming     BytesWithTimestamp
-	receiverChan chan []byte
+// Matching 'struct perf_event_header in <linux/perf_event.h>
+type PerfEventHeader struct {
+	Type      uint32
+	Misc      uint16
+	TotalSize uint16
 }
 
-var callbackRegister = make(map[uint64]*callbackData)
-var callbackIndex uint64
-var mu sync.Mutex
-
-func registerCallback(data *callbackData) uint64 {
-	mu.Lock()
-	defer mu.Unlock()
-	callbackIndex++
-	for callbackRegister[callbackIndex] != nil {
-		callbackIndex++
-	}
-	callbackRegister[callbackIndex] = data
-	return callbackIndex
+// Matching 'struct perf_event_sample in kernel sources
+type PerfEventSample struct {
+	PerfEventHeader
+	Size uint32
+	data byte // Size bytes of data
 }
 
-func unregisterCallback(i uint64) {
-	mu.Lock()
-	defer mu.Unlock()
-	delete(callbackRegister, i)
-}
-
-// Gateway function as required with CGO Go >= 1.6
-// "If a C-program wants a function pointer, a gateway function has to
-// be written. This is because we can't take the address of a Go
-// function and give that to C-code since the cgo tool will generate a
-// stub in C that should be called."
-//export callback_to_go
-func callback_to_go(data unsafe.Pointer, size C.int, callbackDataIndex C.uint64_t) C.int {
-	callbackData := callbackRegister[uint64(callbackDataIndex)]
-
-	b := C.GoBytes(data, size)
-
-	callbackData.incoming = append(callbackData.incoming, b)
-
-	return 1 // event consumed
+// Matching 'struct perf_event_lost in kernel sources
+type PerfEventLost struct {
+	PerfEventHeader
+	Id   uint64
+	Lost uint64
 }
 
 // nowNanoseconds returns a time that can be compared to bpf_ktime_get_ns()
@@ -776,11 +749,7 @@ func nowNanoseconds() uint64 {
 }
 
 func (b *BPFKProbePerf) PollStart(mapName string, receiverChan chan []byte) {
-	callbackData := &callbackData{
-		b:            b,
-		receiverChan: receiverChan,
-	}
-	callbackDataIndex := registerCallback(callbackData)
+	var incoming BytesWithTimestamp
 
 	if _, ok := b.maps[mapName]; !ok {
 		fmt.Fprintf(os.Stderr, "Cannot find map %q. List of found maps:\n", mapName)
@@ -792,6 +761,9 @@ func (b *BPFKProbePerf) PollStart(mapName string, receiverChan chan []byte) {
 
 	go func() {
 		cpuCount := len(b.maps[mapName].pmuFDs)
+		pageSize := os.Getpagesize()
+		pageCount := 8
+		state := C.struct_read_state{}
 
 		for {
 			perfEventPoll(b.maps[mapName].pmuFDs)
@@ -800,25 +772,51 @@ func (b *BPFKProbePerf) PollStart(mapName string, receiverChan chan []byte) {
 				var harvestCount C.int
 				beforeHarvest := nowNanoseconds()
 				for cpu := 0; cpu < cpuCount; cpu++ {
-					harvestCount += C.perf_event_read(b.maps[mapName].headers[cpu],
-						(*[0]byte)(C.callback_to_go),
-						C.uint64_t(callbackDataIndex))
+					for {
+						var sample *PerfEventSample
+						var lost *PerfEventLost
+
+						ok := C.perf_event_read(C.int(pageCount), C.int(pageSize),
+							unsafe.Pointer(&state), unsafe.Pointer(b.maps[mapName].headers[cpu]),
+							unsafe.Pointer(&sample), unsafe.Pointer(&lost))
+
+						switch ok {
+						case 0:
+							break // nothing to read
+						case C.PERF_RECORD_SAMPLE:
+							size := sample.Size - 4
+							b := C.GoBytes(unsafe.Pointer(&sample.data), C.int(size))
+							incoming = append(incoming, b)
+							harvestCount++
+							if *(*uint64)(unsafe.Pointer(&b[0])) > beforeHarvest {
+								break
+							} else {
+								continue
+							}
+						case C.PERF_RECORD_LOST:
+							fmt.Printf("lost event on cpu %d\n", cpu)
+						default:
+							fmt.Printf("unknown event on cpu %d\n", cpu)
+						}
+						break
+					}
+
 				}
 
-				sort.Sort(callbackData.incoming)
+				sort.Sort(incoming)
 
-				for i := 0; i < len(callbackData.incoming); i++ {
-					if *(*uint64)(unsafe.Pointer(&callbackData.incoming[0][0])) > beforeHarvest {
+				for i := 0; i < len(incoming); i++ {
+					if *(*uint64)(unsafe.Pointer(&incoming[0][0])) > beforeHarvest {
 						// This record has been sent after the beginning of the harvest. Stop
 						// processing here to keep the order. "incoming" is sorted, so the next
 						// elements also must not be processed now.
 						break
 					}
-					receiverChan <- callbackData.incoming[0]
+					receiverChan <- incoming[0]
 					// remove first element
-					callbackData.incoming = callbackData.incoming[1:]
+					incoming = incoming[1:]
 				}
-				if harvestCount == 0 && len(callbackData.incoming) == 0 {
+				if harvestCount == 0 && len(incoming) == 0 {
 					break
 				}
 			}
