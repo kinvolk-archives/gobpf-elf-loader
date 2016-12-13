@@ -7,7 +7,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
@@ -153,6 +156,7 @@ type tcpTracerStatus struct {
 	pid_tgid     uint64
 	what         uint64
 	offset_saddr uint64
+	offset_sport uint64
 
 	saddr uint32
 	daddr uint32
@@ -161,7 +165,27 @@ type tcpTracerStatus struct {
 	netns uint32
 }
 
+func listen(url string) {
+	l, err := net.Listen("tcp4", url)
+	if err != nil {
+		fmt.Println("Error listening:", err.Error())
+		os.Exit(1)
+	}
+	defer l.Close()
+	fmt.Println("Listening on " + url)
+	for {
+		_, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting: ", err.Error())
+			os.Exit(1)
+		}
+	}
+}
+
 func guessWhat(b *bpf.BPFKProbePerf) error {
+	go listen("127.0.0.2:80")
+	time.Sleep(300 * time.Millisecond)
+
 	currentNetns, err := netns.Get()
 	if err != nil {
 		return fmt.Errorf("error getting current netns: %v", err)
@@ -187,8 +211,9 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	status := tcpTracerStatus{
 		status:       1,
 		pid_tgid:     pid_tgid,
-		what:         0,
+		what:         4,
 		offset_saddr: 0,
+		offset_sport: 0,
 		saddr:        0x0100007F,
 		daddr:        0x0200007F,
 		sport:        65535,
@@ -202,10 +227,18 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		_, err = net.Dial("tcp", "127.0.0.2:80")
+		conn, err := net.Dial("tcp4", "127.0.0.2:80")
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
 		}
+
+		sport, err := strconv.Atoi(strings.Split(conn.LocalAddr().String(), ":")[1])
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
+		}
+		fmt.Println("real_sport =", sport)
+
+		status.sport = uint16(sport)
 
 		err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
@@ -217,7 +250,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			case 0:
 				fmt.Printf("%x\n", status.saddr)
 				if status.saddr == 0x0100007F {
-					fmt.Println("offset found:", status.offset_saddr)
+					fmt.Println("offset_saddr found:", status.offset_saddr)
 					status.what++
 					os.Exit(0)
 				} else {
@@ -225,10 +258,23 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = 1
 					status.saddr = 0x0100007F
 				}
+			case 4:
+				fmt.Printf("%d\n", status.sport)
+				if uint16(sport) == status.sport {
+					fmt.Println("offset_sport found:", status.offset_sport)
+					status.what++
+					os.Exit(0)
+				} else {
+					status.offset_sport++
+					status.status = 1
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "uh oh!\n")
+				os.Exit(1)
 			}
 		}
 
-		if status.offset_saddr >= 50 {
+		if status.offset_saddr >= 50 || status.offset_sport >= 50 {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
