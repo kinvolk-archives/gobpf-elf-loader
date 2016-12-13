@@ -101,8 +101,17 @@ func tcpEventCbV4(event tcpEventV4) {
 	lastTimestampV4 = timestamp
 }
 
+type tcpTracerState uint64
+
+const (
+	Uninitialized tcpTracerState = iota
+	Checking
+	Checked
+	Ready
+)
+
 type tcpTracerStatus struct {
-	status uint64
+	status tcpTracerState
 
 	pid_tgid     uint64
 	what         uint64
@@ -159,7 +168,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	zero = 0
 
 	status := tcpTracerStatus{
-		status:       1,
+		status:       tcpTracerState(Checking),
 		pid_tgid:     pid_tgid,
 		what:         0,
 		offset_saddr: 0,
@@ -203,17 +212,17 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		if status.status == 2 {
+		if status.status == tcpTracerState(Checked) {
 			switch status.what {
 			case 0:
 				//				fmt.Printf("%x\n", status.saddr)
 				if status.saddr == 0x0100007F {
 					fmt.Println("offset_saddr found:", status.offset_saddr)
 					status.what++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				} else {
 					status.offset_saddr++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 					status.saddr = 0x0100007F
 				}
 			case 1:
@@ -221,10 +230,10 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				if status.daddr == 0x0200007F {
 					fmt.Println("offset_daddr found:", status.offset_daddr)
 					status.what++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				} else {
 					status.offset_daddr++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 					status.daddr = 0x0200007F
 				}
 			case 2:
@@ -232,31 +241,31 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				if uint16(sport) == status.sport {
 					fmt.Println("offset_sport found:", status.offset_sport)
 					status.what++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				} else {
 					status.offset_sport++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				}
 			case 3:
 				//				fmt.Printf("%d\n", status.dport)
 				if uint16(dport) == status.dport {
 					fmt.Println("offset_dport found:", status.offset_dport)
 					status.what++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				} else {
 					status.offset_dport++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				}
 			case 4:
 				//				fmt.Printf("%d\n", status.netns)
 				if netns == status.netns {
 					fmt.Println("offset_netns found:", status.offset_netns)
 					status.what++
-					status.status = 3
+					status.status = tcpTracerState(Ready)
 					break
 				} else {
 					status.offset_netns++
-					status.status = 1
+					status.status = tcpTracerState(Checking)
 				}
 			default:
 				return fmt.Errorf("Uh, oh!")
@@ -270,7 +279,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			}
 		*/
 
-		if status.status == 3 {
+		if status.status == tcpTracerState(Ready) {
 			break
 		}
 	}
