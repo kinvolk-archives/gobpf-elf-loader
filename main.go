@@ -185,24 +185,23 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	zero = 0
 
 	status := tcpTracerStatus{
-		status: 1,
-
+		status:       1,
 		pid_tgid:     pid_tgid,
 		what:         0,
 		offset_saddr: 0,
 		saddr:        0x0100007F,
-		daddr:        99,
-		sport:        99,
-		dport:        99,
-		netns:        99,
-	}
-
-	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
-	if err != nil {
-		return fmt.Errorf("error: %v", err)
+		daddr:        0x0200007F,
+		sport:        65535,
+		dport:        80,
+		netns:        uint32(s.Ino),
 	}
 
 	for {
+		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
+		}
+
 		_, err = net.Dial("tcp", "127.0.0.2:80")
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
@@ -214,11 +213,22 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		}
 
 		if status.status == 2 {
-			fmt.Println("offset found:", status.offset_saddr)
-			os.Exit(0)
+			switch status.what {
+			case 0:
+				fmt.Printf("%x\n", status.saddr)
+				if status.saddr == 0x0100007F {
+					fmt.Println("offset found:", status.offset_saddr)
+					status.what++
+					os.Exit(0)
+				} else {
+					status.offset_saddr++
+					status.status = 1
+					status.saddr = 0x0100007F
+				}
+			}
 		}
 
-		if status.offset_saddr >= 10 {
+		if status.offset_saddr >= 50 {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
