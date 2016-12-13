@@ -159,6 +159,7 @@ type tcpTracerStatus struct {
 	offset_daddr uint64
 	offset_sport uint64
 	offset_dport uint64
+	offset_netns uint64
 
 	saddr uint32
 	daddr uint32
@@ -214,6 +215,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		offset_daddr: 0,
 		offset_sport: 0,
 		offset_dport: 0,
+		offset_netns: 0,
 		saddr:        0x0100007F,
 		daddr:        0x0200007F,
 		sport:        65535,
@@ -222,7 +224,10 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	}
 
 	for {
+		// net endianness
 		dport := 0x8323
+		netns := uint32(s.Ino)
+		status.netns = netns
 		status.dport = uint16(dport)
 
 		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
@@ -286,12 +291,20 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				if uint16(dport) == status.dport {
 					fmt.Println("offset_dport found:", status.offset_dport)
 					status.what++
+					status.status = 1
 				} else {
 					status.offset_dport++
 					status.status = 1
 				}
 			case 4:
-				status.what++
+				if netns == status.netns {
+					fmt.Println("offset_netns found:", status.offset_netns)
+					status.what++
+					status.status = 1
+				} else {
+					status.offset_netns++
+					status.status = 1
+				}
 			default:
 				os.Exit(0)
 			}
