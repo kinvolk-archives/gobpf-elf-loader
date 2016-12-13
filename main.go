@@ -248,41 +248,37 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = 1
 				}
 			case 4:
+				//				fmt.Printf("%d\n", status.netns)
 				if netns == status.netns {
 					fmt.Println("offset_netns found:", status.offset_netns)
 					status.what++
-					status.status = 1
+					status.status = 3
+					break
 				} else {
 					status.offset_netns++
 					status.status = 1
 				}
 			default:
-				os.Exit(0)
+				return fmt.Errorf("Uh, oh!")
 			}
 		}
 
-		if status.offset_saddr >= 50 || status.offset_sport >= 50 {
-			fmt.Println("overflow!")
-			os.Exit(1)
+		/*
+			if status.offset_saddr >= 50 || status.offset_sport >= 50 {
+				fmt.Println("overflow!")
+				os.Exit(1)
+			}
+		*/
+
+		if status.status == 3 {
+			break
 		}
 	}
 
-	// for status != READY {
-	//   known_tuple = { whatever }
-	//   generate connection with known_tuple
-	//   for status != CHECKED {
-	//     sleep
-	//   }
-	//   tuple = get_tuple()
-	//   if tuple[what] == known_tuple[what]
-	//     if what == len(what)
-	//       state = READY
-	//     else
-	//       what++
-	//       offset = 0
-	//   else
-	//     offset++
-	// }
+	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	if err != nil {
+		return fmt.Errorf("error: %v", err)
+	}
 
 	return nil
 }
