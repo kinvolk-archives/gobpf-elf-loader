@@ -54,23 +54,6 @@ type tcpEventV4 struct {
 	NetNS uint32
 }
 
-type tcpEventV6 struct {
-	// Timestamp must be the first field, the sorting depends on it
-	Timestamp uint64
-
-	Cpu    uint64
-	Type   uint32
-	Pid    uint32
-	Comm   [16]byte
-	SAddrH uint64
-	SAddrL uint64
-	DAddrH uint64
-	DAddrL uint64
-	SPort  uint16
-	DPort  uint16
-	NetNS  uint32
-}
-
 var byteOrder binary.ByteOrder
 
 // In lack of binary.HostEndian ...
@@ -87,7 +70,6 @@ func init() {
 }
 
 var lastTimestampV4 uint64
-var lastTimestampV6 uint64
 
 func tcpEventCbV4(event tcpEventV4) {
 	timestamp := uint64(event.Timestamp)
@@ -117,37 +99,6 @@ func tcpEventCbV4(event tcpEventV4) {
 	}
 
 	lastTimestampV4 = timestamp
-}
-
-func tcpEventCbV6(event tcpEventV6) {
-	timestamp := uint64(event.Timestamp)
-	cpu := event.Cpu
-	typ := EventType(event.Type)
-	pid := event.Pid & 0xffffffff
-
-	saddrbuf := make([]byte, 16)
-	daddrbuf := make([]byte, 16)
-
-	binary.LittleEndian.PutUint64(saddrbuf, event.SAddrH)
-	binary.LittleEndian.PutUint64(saddrbuf[4:], event.SAddrL)
-	binary.LittleEndian.PutUint64(daddrbuf, event.DAddrH)
-	binary.LittleEndian.PutUint64(daddrbuf[4:], event.DAddrL)
-
-	sIP := net.IP(saddrbuf)
-	dIP := net.IP(daddrbuf)
-
-	sport := event.SPort
-	dport := event.DPort
-	netns := event.NetNS
-
-	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
-
-	if lastTimestampV6 > timestamp {
-		fmt.Printf("ERROR: late event!\n")
-		os.Exit(1)
-	}
-
-	lastTimestampV6 = timestamp
 }
 
 type tcpTracerStatus struct {
@@ -362,7 +313,6 @@ func main() {
 	fmt.Printf("Ready.\n")
 
 	channelV4 := make(chan []byte)
-	channelV6 := make(chan []byte)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
@@ -380,22 +330,7 @@ func main() {
 		}
 	}()
 
-	go func() {
-		var event tcpEventV6
-		for {
-			data := <-channelV6
-			err := binary.Read(bytes.NewBuffer(data), byteOrder, &event)
-			if err != nil {
-				fmt.Printf("failed to decode received data: %s\n", err)
-				continue
-			}
-			tcpEventCbV6(event)
-		}
-	}()
-
 	b.PollStart("tcp_event_v4", channelV4)
-	b.PollStart("tcp_event_v6", channelV6)
 	<-sig
 	b.PollStop("tcp_event_v4")
-	b.PollStop("tcp_event_v6")
 }
