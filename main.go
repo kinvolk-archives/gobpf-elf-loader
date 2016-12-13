@@ -110,11 +110,21 @@ const (
 	Ready
 )
 
+type What uint64
+
+const (
+	GuessSaddr What = iota
+	GuessDaddr
+	GuessSport
+	GuessDport
+	GuessNetns
+)
+
 type tcpTracerStatus struct {
 	status tcpTracerState
 
 	pid_tgid     uint64
-	what         uint64
+	what         What
 	offset_saddr uint64
 	offset_daddr uint64
 	offset_sport uint64
@@ -168,7 +178,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	zero = 0
 
 	status := tcpTracerStatus{
-		status:       tcpTracerState(Checking),
+		status:       Checking,
 		pid_tgid:     pid_tgid,
 		what:         0,
 		offset_saddr: 0,
@@ -212,60 +222,60 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		if status.status == tcpTracerState(Checked) {
+		if status.status == Checked {
 			switch status.what {
-			case 0:
+			case GuessSaddr:
 				//				fmt.Printf("%x\n", status.saddr)
 				if status.saddr == 0x0100007F {
 					fmt.Println("offset_saddr found:", status.offset_saddr)
 					status.what++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				} else {
 					status.offset_saddr++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 					status.saddr = 0x0100007F
 				}
-			case 1:
+			case GuessDaddr:
 				//				fmt.Printf("%x\n", status.daddr)
 				if status.daddr == 0x0200007F {
 					fmt.Println("offset_daddr found:", status.offset_daddr)
 					status.what++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				} else {
 					status.offset_daddr++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 					status.daddr = 0x0200007F
 				}
-			case 2:
+			case GuessSport:
 				//				fmt.Printf("%d\n", status.sport)
 				if uint16(sport) == status.sport {
 					fmt.Println("offset_sport found:", status.offset_sport)
 					status.what++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				} else {
 					status.offset_sport++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				}
-			case 3:
+			case GuessDport:
 				//				fmt.Printf("%d\n", status.dport)
 				if uint16(dport) == status.dport {
 					fmt.Println("offset_dport found:", status.offset_dport)
 					status.what++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				} else {
 					status.offset_dport++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				}
-			case 4:
+			case GuessNetns:
 				//				fmt.Printf("%d\n", status.netns)
 				if netns == status.netns {
 					fmt.Println("offset_netns found:", status.offset_netns)
 					status.what++
-					status.status = tcpTracerState(Ready)
+					status.status = Ready
 					break
 				} else {
 					status.offset_netns++
-					status.status = tcpTracerState(Checking)
+					status.status = Checking
 				}
 			default:
 				return fmt.Errorf("Uh, oh!")
@@ -281,7 +291,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			os.Exit(1)
 		}
 
-		if status.status == tcpTracerState(Ready) {
+		if status.status == Ready {
 			break
 		}
 	}
