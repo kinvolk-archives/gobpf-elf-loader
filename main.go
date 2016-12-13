@@ -272,12 +272,14 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			}
 		}
 
-		/*
-			if status.offset_saddr >= 50 || status.offset_sport >= 50 {
-				fmt.Println("overflow!")
-				os.Exit(1)
-			}
-		*/
+		if status.offset_saddr >= 50 ||
+			status.offset_daddr >= 50 ||
+			status.offset_sport >= 50 ||
+			status.offset_dport >= 50 ||
+			status.offset_netns >= 50 {
+			fmt.Println("overflow!")
+			os.Exit(1)
+		}
 
 		if status.status == tcpTracerState(Ready) {
 			break
