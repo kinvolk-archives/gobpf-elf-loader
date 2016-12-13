@@ -156,7 +156,9 @@ type tcpTracerStatus struct {
 	pid_tgid     uint64
 	what         uint64
 	offset_saddr uint64
+	offset_daddr uint64
 	offset_sport uint64
+	offset_dport uint64
 
 	saddr uint32
 	daddr uint32
@@ -183,7 +185,7 @@ func listen(url string) {
 }
 
 func guessWhat(b *bpf.BPFKProbePerf) error {
-	go listen("127.0.0.2:80")
+	go listen("127.0.0.2:9091")
 	time.Sleep(300 * time.Millisecond)
 
 	currentNetns, err := netns.Get()
@@ -197,13 +199,9 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	}
 
 	mp := b.Map("tcptracer_status")
-	fmt.Println(mp)
-
-	//dummyIP := net.IPv4(192, 16, 90, 10)
 
 	var pid_tgid uint64
 	pid_tgid = uint64(os.Getpid()<<32 | syscall.Gettid())
-	fmt.Println(pid_tgid)
 
 	var zero uint64
 	zero = 0
@@ -211,23 +209,28 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	status := tcpTracerStatus{
 		status:       1,
 		pid_tgid:     pid_tgid,
-		what:         4,
+		what:         0,
 		offset_saddr: 0,
+		offset_daddr: 0,
 		offset_sport: 0,
+		offset_dport: 0,
 		saddr:        0x0100007F,
 		daddr:        0x0200007F,
 		sport:        65535,
-		dport:        80,
+		dport:        0x2383,
 		netns:        uint32(s.Ino),
 	}
 
 	for {
+		dport := 0x8323
+		status.dport = uint16(dport)
+
 		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		conn, err := net.Dial("tcp4", "127.0.0.2:80")
+		conn, err := net.Dial("tcp4", "127.0.0.2:9091")
 		if err != nil {
 			fmt.Printf("error: %v\n", err)
 		}
@@ -236,7 +239,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
-		fmt.Println("real_sport =", sport)
 
 		status.sport = uint16(sport)
 
@@ -248,29 +250,50 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		if status.status == 2 {
 			switch status.what {
 			case 0:
-				fmt.Printf("%x\n", status.saddr)
+				//				fmt.Printf("%x\n", status.saddr)
 				if status.saddr == 0x0100007F {
 					fmt.Println("offset_saddr found:", status.offset_saddr)
 					status.what++
-					os.Exit(0)
+					status.status = 1
 				} else {
 					status.offset_saddr++
 					status.status = 1
 					status.saddr = 0x0100007F
 				}
-			case 4:
-				fmt.Printf("%d\n", status.sport)
+			case 1:
+				//				fmt.Printf("%x\n", status.daddr)
+				if status.daddr == 0x0200007F {
+					fmt.Println("offset_daddr found:", status.offset_daddr)
+					status.what++
+					status.status = 1
+				} else {
+					status.offset_daddr++
+					status.status = 1
+					status.daddr = 0x0200007F
+				}
+			case 2:
+				//				fmt.Printf("%d\n", status.sport)
 				if uint16(sport) == status.sport {
 					fmt.Println("offset_sport found:", status.offset_sport)
 					status.what++
-					os.Exit(0)
+					status.status = 1
 				} else {
 					status.offset_sport++
 					status.status = 1
 				}
+			case 3:
+				//				fmt.Printf("%d\n", status.dport)
+				if uint16(dport) == status.dport {
+					fmt.Println("offset_dport found:", status.offset_dport)
+					status.what++
+				} else {
+					status.offset_dport++
+					status.status = 1
+				}
+			case 4:
+				status.what++
 			default:
-				fmt.Fprintf(os.Stderr, "uh oh!\n")
-				os.Exit(1)
+				os.Exit(0)
 			}
 		}
 
