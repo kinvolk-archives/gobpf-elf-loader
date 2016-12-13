@@ -130,6 +130,7 @@ type tcpTracerStatus struct {
 	offset_sport uint64
 	offset_dport uint64
 	offset_netns uint64
+	offset_ino   uint64
 
 	saddr uint32
 	daddr uint32
@@ -185,7 +186,8 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		offset_daddr: 0,
 		offset_sport: 0,
 		offset_dport: 0,
-		offset_netns: 0,
+		offset_netns: 45,
+		offset_ino:   135,
 		saddr:        0x0100007F,
 		daddr:        0x0200007F,
 		sport:        65535,
@@ -214,6 +216,8 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
+
+		conn.Close()
 
 		status.sport = uint16(sport)
 
@@ -270,11 +274,16 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				//				fmt.Printf("%d\n", status.netns)
 				if netns == status.netns {
 					fmt.Println("offset_netns found:", status.offset_netns)
+					fmt.Println("offset_ino found:", status.offset_ino)
 					status.what++
 					status.status = Ready
 					break
 				} else {
-					status.offset_netns++
+					status.offset_ino++
+					if status.offset_ino >= 200 {
+						status.offset_ino = 15
+						status.offset_netns++
+					}
 					status.status = Checking
 				}
 			default:
@@ -286,7 +295,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			status.offset_daddr >= 50 ||
 			status.offset_sport >= 50 ||
 			status.offset_dport >= 50 ||
-			status.offset_netns >= 50 {
+			status.offset_netns >= 100 {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
