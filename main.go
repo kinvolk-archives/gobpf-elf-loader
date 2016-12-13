@@ -197,6 +197,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		sport:         65535,
 		dport:         0x2383,
 		netns:         uint32(s.Ino),
+		family:        0,
 	}
 
 	for {
@@ -283,7 +284,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					fmt.Println("offset_ino found:", status.offset_ino)
 					status.what++
 					status.status = Checking
-					break
 				} else {
 					status.offset_ino++
 					if status.offset_ino >= 200 {
@@ -297,6 +297,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					fmt.Println("offset_family found:", status.offset_family)
 					status.what++
 					status.status = Ready
+					break
 				} else {
 					status.offset_family++
 					status.status = Checking
