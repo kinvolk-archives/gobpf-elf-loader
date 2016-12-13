@@ -173,14 +173,14 @@ func listen(url string) {
 		fmt.Println("Error listening:", err.Error())
 		os.Exit(1)
 	}
-	defer l.Close()
 	fmt.Println("Listening on " + url)
 	for {
-		_, err := l.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("Error accepting: ", err.Error())
 			os.Exit(1)
 		}
+		conn.Close()
 	}
 }
 
