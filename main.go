@@ -118,25 +118,28 @@ const (
 	GuessSport
 	GuessDport
 	GuessNetns
+	GuessFamily
 )
 
 type tcpTracerStatus struct {
 	status tcpTracerState
 
-	pid_tgid     uint64
-	what         What
-	offset_saddr uint64
-	offset_daddr uint64
-	offset_sport uint64
-	offset_dport uint64
-	offset_netns uint64
-	offset_ino   uint64
+	pid_tgid      uint64
+	what          What
+	offset_saddr  uint64
+	offset_daddr  uint64
+	offset_sport  uint64
+	offset_dport  uint64
+	offset_netns  uint64
+	offset_ino    uint64
+	offset_family uint64
 
-	saddr uint32
-	daddr uint32
-	sport uint16
-	dport uint16
-	netns uint32
+	saddr  uint32
+	daddr  uint32
+	sport  uint16
+	dport  uint16
+	netns  uint32
+	family uint16
 }
 
 func listen(url string) {
@@ -179,26 +182,29 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 	zero = 0
 
 	status := tcpTracerStatus{
-		status:       Checking,
-		pid_tgid:     pid_tgid,
-		what:         0,
-		offset_saddr: 0,
-		offset_daddr: 0,
-		offset_sport: 0,
-		offset_dport: 0,
-		offset_netns: 45,
-		offset_ino:   135,
-		saddr:        0x0100007F,
-		daddr:        0x0200007F,
-		sport:        65535,
-		dport:        0x2383,
-		netns:        uint32(s.Ino),
+		status:        Checking,
+		pid_tgid:      pid_tgid,
+		what:          0,
+		offset_saddr:  0,
+		offset_daddr:  0,
+		offset_sport:  0,
+		offset_dport:  0,
+		offset_netns:  45,
+		offset_ino:    135,
+		offset_family: 0,
+		saddr:         0x0100007F,
+		daddr:         0x0200007F,
+		sport:         65535,
+		dport:         0x2383,
+		netns:         uint32(s.Ino),
 	}
 
 	for {
 		// net endianness
 		dport := 0x8323
 		netns := uint32(s.Ino)
+		// FIXME AF_INET
+		family := 2
 		status.netns = netns
 		status.dport = uint16(dport)
 
@@ -276,7 +282,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					fmt.Println("offset_netns found:", status.offset_netns)
 					fmt.Println("offset_ino found:", status.offset_ino)
 					status.what++
-					status.status = Ready
+					status.status = Checking
 					break
 				} else {
 					status.offset_ino++
@@ -284,6 +290,15 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 						status.offset_ino = 15
 						status.offset_netns++
 					}
+					status.status = Checking
+				}
+			case GuessFamily:
+				if uint16(family) == status.family {
+					fmt.Println("offset_family found:", status.offset_family)
+					status.what++
+					status.status = Ready
+				} else {
+					status.offset_family++
 					status.status = Checking
 				}
 			default:
