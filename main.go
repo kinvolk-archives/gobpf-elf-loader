@@ -192,22 +192,24 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		offset_netns:  45,
 		offset_ino:    135,
 		offset_family: 0,
-		saddr:         0x0100007F,
-		daddr:         0x0200007F,
-		sport:         65535,
-		dport:         0x2383,
-		netns:         uint32(s.Ino),
+		saddr:         0,
+		daddr:         0,
+		sport:         0,
+		dport:         0,
+		netns:         0,
 		family:        0,
 	}
 
 	for {
-		// net endianness
+		// 127.0.0.1
+		saddr := 0x0100007F
+		// 127.0.0.2
+		daddr := 0x0200007F
+		// 9091 (net endianness)
 		dport := 0x8323
 		netns := uint32(s.Ino)
-		// FIXME AF_INET
+		// AF_INET
 		family := 2
-		status.netns = netns
-		status.dport = uint16(dport)
 
 		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
@@ -226,8 +228,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 
 		conn.Close()
 
-		status.sport = uint16(sport)
-
 		err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
@@ -236,8 +236,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		if status.status == Checked {
 			switch status.what {
 			case GuessSaddr:
-				//				fmt.Printf("%x\n", status.saddr)
-				if status.saddr == 0x0100007F {
+				if status.saddr == uint32(saddr) {
 					fmt.Println("offset_saddr found:", status.offset_saddr)
 					status.what++
 					status.status = Checking
@@ -247,8 +246,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.saddr = 0x0100007F
 				}
 			case GuessDaddr:
-				//				fmt.Printf("%x\n", status.daddr)
-				if status.daddr == 0x0200007F {
+				if status.daddr == uint32(daddr) {
 					fmt.Println("offset_daddr found:", status.offset_daddr)
 					status.what++
 					status.status = Checking
@@ -258,8 +256,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.daddr = 0x0200007F
 				}
 			case GuessSport:
-				//				fmt.Printf("%d\n", status.sport)
-				if uint16(sport) == status.sport {
+				if status.sport == uint16(sport) {
 					fmt.Println("offset_sport found:", status.offset_sport)
 					status.what++
 					status.status = Checking
@@ -268,8 +265,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = Checking
 				}
 			case GuessDport:
-				//				fmt.Printf("%d\n", status.dport)
-				if uint16(dport) == status.dport {
+				if status.dport == uint16(dport) {
 					fmt.Println("offset_dport found:", status.offset_dport)
 					status.what++
 					status.status = Checking
@@ -278,8 +274,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = Checking
 				}
 			case GuessNetns:
-				//				fmt.Printf("%d\n", status.netns)
-				if netns == status.netns {
+				if status.netns == netns {
 					fmt.Println("offset_netns found:", status.offset_netns)
 					fmt.Println("offset_ino found:", status.offset_ino)
 					status.what++
@@ -293,7 +288,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = Checking
 				}
 			case GuessFamily:
-				if uint16(family) == status.family {
+				if status.family == uint16(family) {
 					fmt.Println("offset_family found:", status.offset_family)
 					status.what++
 					status.status = Ready
