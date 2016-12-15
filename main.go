@@ -54,6 +54,23 @@ type tcpEventV4 struct {
 	NetNS uint32
 }
 
+type tcpEventV6 struct {
+	// Timestamp must be the first field, the sorting depends on it
+	Timestamp uint64
+
+	Cpu    uint64
+	Type   uint32
+	Pid    uint32
+	Comm   [16]byte
+	SAddrH uint64
+	SAddrL uint64
+	DAddrH uint64
+	DAddrL uint64
+	SPort  uint16
+	DPort  uint16
+	NetNS  uint32
+}
+
 var byteOrder binary.ByteOrder
 
 // In lack of binary.HostEndian ...
@@ -70,6 +87,7 @@ func init() {
 }
 
 var lastTimestampV4 uint64
+var lastTimestampV6 uint64
 
 func tcpEventCbV4(event tcpEventV4) {
 	timestamp := uint64(event.Timestamp)
@@ -101,6 +119,37 @@ func tcpEventCbV4(event tcpEventV4) {
 	lastTimestampV4 = timestamp
 }
 
+func tcpEventCbV6(event tcpEventV6) {
+	timestamp := uint64(event.Timestamp)
+	cpu := event.Cpu
+	typ := EventType(event.Type)
+	pid := event.Pid & 0xffffffff
+
+	saddrbuf := make([]byte, 16)
+	daddrbuf := make([]byte, 16)
+
+	binary.LittleEndian.PutUint64(saddrbuf, event.SAddrH)
+	binary.LittleEndian.PutUint64(saddrbuf[4:], event.SAddrL)
+	binary.LittleEndian.PutUint64(daddrbuf, event.DAddrH)
+	binary.LittleEndian.PutUint64(daddrbuf[4:], event.DAddrL)
+
+	sIP := net.IP(saddrbuf)
+	dIP := net.IP(daddrbuf)
+
+	sport := event.SPort
+	dport := event.DPort
+	netns := event.NetNS
+
+	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
+
+	if lastTimestampV6 > timestamp {
+		fmt.Printf("ERROR: late event!\n")
+		os.Exit(1)
+	}
+
+	lastTimestampV6 = timestamp
+}
+
 type tcpTracerState uint64
 
 const (
@@ -119,31 +168,34 @@ const (
 	GuessDport
 	GuessNetns
 	GuessFamily
+	GuessIPv6Addr
 )
 
 type tcpTracerStatus struct {
 	status tcpTracerState
 
-	pid_tgid      uint64
-	what          What
-	offset_saddr  uint64
-	offset_daddr  uint64
-	offset_sport  uint64
-	offset_dport  uint64
-	offset_netns  uint64
-	offset_ino    uint64
-	offset_family uint64
+	pid_tgid         uint64
+	what             What
+	offset_saddr     uint64
+	offset_daddr     uint64
+	offset_sport     uint64
+	offset_dport     uint64
+	offset_netns     uint64
+	offset_ino       uint64
+	offset_family    uint64
+	offset_ipv6_addr uint64
 
-	saddr  uint32
-	daddr  uint32
-	sport  uint16
-	dport  uint16
-	netns  uint32
-	family uint16
+	saddr     uint32
+	daddr     uint32
+	sport     uint16
+	dport     uint16
+	netns     uint32
+	family    uint16
+	ipv6_addr [4]uint32
 }
 
-func listen(url string) {
-	l, err := net.Listen("tcp4", url)
+func listen(url, netType string) {
+	l, err := net.Listen(netType, url)
 	if err != nil {
 		fmt.Println("Error listening:", err.Error())
 		os.Exit(1)
@@ -159,8 +211,17 @@ func listen(url string) {
 	}
 }
 
+func compareThings(a, b [4]uint32) bool {
+	for i := 2; i < 4; i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func guessWhat(b *bpf.BPFKProbePerf) error {
-	go listen("127.0.0.2:9091")
+	go listen("127.0.0.2:9091", "tcp4")
 	time.Sleep(300 * time.Millisecond)
 
 	currentNetns, err := netns.Get()
@@ -207,26 +268,42 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		daddr := 0x0200007F
 		// 9091 (net endianness)
 		dport := 0x8323
+		// will be set later
+		sport := 0
 		netns := uint32(s.Ino)
 		// AF_INET
 		family := 2
+
+		var ipv6_addr [4]uint32
+
+		ipv6_addr[0] = 0xaddeefbe
+		ipv6_addr[1] = 0xaddefec0
+		ipv6_addr[2] = 0x67452301
+		ipv6_addr[3] = 0xefcdab89
 
 		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		conn, err := net.Dial("tcp4", "127.0.0.2:9091")
-		if err != nil {
-			fmt.Printf("error: %v\n", err)
-		}
+		if status.what != GuessIPv6Addr {
+			conn, err := net.Dial("tcp4", "127.0.0.2:9091")
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+			}
 
-		sport, err := strconv.Atoi(strings.Split(conn.LocalAddr().String(), ":")[1])
-		if err != nil {
-			return fmt.Errorf("error: %v", err)
-		}
+			sport, err = strconv.Atoi(strings.Split(conn.LocalAddr().String(), ":")[1])
+			if err != nil {
+				return fmt.Errorf("error: %v", err)
+			}
 
-		conn.Close()
+			conn.Close()
+		} else {
+			conn, err := net.Dial("tcp6", "[dead:c0fe:dead:beef:0123:4567:89ab:cdef]:9092")
+			if err == nil {
+				conn.Close()
+			}
+		}
 
 		err = b.LookupElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
@@ -243,7 +320,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				} else {
 					status.offset_saddr++
 					status.status = Checking
-					status.saddr = 0x0100007F
+					status.saddr = uint32(saddr)
 				}
 			case GuessDaddr:
 				if status.daddr == uint32(daddr) {
@@ -253,7 +330,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				} else {
 					status.offset_daddr++
 					status.status = Checking
-					status.daddr = 0x0200007F
+					status.daddr = uint32(daddr)
 				}
 			case GuessSport:
 				if status.sport == uint16(sport) {
@@ -291,10 +368,19 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 				if status.family == uint16(family) {
 					fmt.Println("offset_family found:", status.offset_family)
 					status.what++
+					status.status = Checking
+				} else {
+					status.offset_family++
+					status.status = Checking
+				}
+			case GuessIPv6Addr:
+				if compareThings(status.ipv6_addr, ipv6_addr) {
+					fmt.Println("offset_ipv6_addr found:", status.offset_ipv6_addr)
+					status.what++
 					status.status = Ready
 					break
 				} else {
-					status.offset_family++
+					status.offset_ipv6_addr++
 					status.status = Checking
 				}
 			default:
@@ -306,7 +392,9 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			status.offset_daddr >= 50 ||
 			status.offset_sport >= 50 ||
 			status.offset_dport >= 50 ||
-			status.offset_netns >= 100 {
+			status.offset_netns >= 100 ||
+			status.offset_family >= 50 ||
+			status.offset_ipv6_addr >= 100 {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
@@ -350,6 +438,7 @@ func main() {
 	fmt.Printf("Ready.\n")
 
 	channelV4 := make(chan []byte)
+	channelV6 := make(chan []byte)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
@@ -367,7 +456,22 @@ func main() {
 		}
 	}()
 
-	b.PollStart("tcp_event_v4", channelV4)
+	go func() {
+		var event tcpEventV6
+		for {
+			data := <-channelV6
+			err := binary.Read(bytes.NewBuffer(data), byteOrder, &event)
+			if err != nil {
+				fmt.Printf("failed to decode received data: %s\n", err)
+				continue
+			}
+			tcpEventCbV6(event)
+		}
+	}()
+
+	b.PollStart("tcp_event_ipv4", channelV4)
+	b.PollStart("tcp_event_ipv6", channelV6)
 	<-sig
-	b.PollStop("tcp_event_v4")
+	b.PollStop("tcp_event_ipv4")
+	b.PollStop("tcp_event_ipv6")
 }
