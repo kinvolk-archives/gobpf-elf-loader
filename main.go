@@ -168,22 +168,22 @@ const (
 	GuessDport
 	GuessNetns
 	GuessFamily
-	GuessIPv6Addr
+	GuessDaddrIPv6
 )
 
 type tcpTracerStatus struct {
 	status tcpTracerState
 
-	pid_tgid         uint64
-	what             What
-	offset_saddr     uint64
-	offset_daddr     uint64
-	offset_sport     uint64
-	offset_dport     uint64
-	offset_netns     uint64
-	offset_ino       uint64
-	offset_family    uint64
-	offset_ipv6_addr uint64
+	pidTgid         uint64
+	what            What
+	offsetSaddr     uint64
+	offsetDaddr     uint64
+	offsetSport     uint64
+	offsetDport     uint64
+	offsetNetns     uint64
+	offsetIno       uint64
+	offsetFamily    uint64
+	offsetDaddrIPv6 uint64
 
 	saddr     uint32
 	daddr     uint32
@@ -191,7 +191,7 @@ type tcpTracerStatus struct {
 	dport     uint16
 	netns     uint32
 	family    uint16
-	ipv6_addr [4]uint32
+	daddrIPv6 [4]uint32
 }
 
 func listen(url, netType string) {
@@ -236,29 +236,29 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 
 	mp := b.Map("tcptracer_status")
 
-	var pid_tgid uint64
-	pid_tgid = uint64(os.Getpid()<<32 | syscall.Gettid())
+	var pidTgid uint64
+	pidTgid = uint64(os.Getpid()<<32 | syscall.Gettid())
 
 	var zero uint64
 	zero = 0
 
 	status := tcpTracerStatus{
-		status:        Checking,
-		pid_tgid:      pid_tgid,
-		what:          0,
-		offset_saddr:  0,
-		offset_daddr:  0,
-		offset_sport:  0,
-		offset_dport:  0,
-		offset_netns:  45,
-		offset_ino:    135,
-		offset_family: 0,
-		saddr:         0,
-		daddr:         0,
-		sport:         0,
-		dport:         0,
-		netns:         0,
-		family:        0,
+		status:       Checking,
+		pidTgid:      pidTgid,
+		what:         0,
+		offsetSaddr:  0,
+		offsetDaddr:  0,
+		offsetSport:  0,
+		offsetDport:  0,
+		offsetNetns:  45,
+		offsetIno:    135,
+		offsetFamily: 0,
+		saddr:        0,
+		daddr:        0,
+		sport:        0,
+		dport:        0,
+		netns:        0,
+		family:       0,
 	}
 
 	for {
@@ -274,19 +274,20 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		// AF_INET
 		family := 2
 
-		var ipv6_addr [4]uint32
+		var daddrIPv6 [4]uint32
 
-		ipv6_addr[0] = 0xaddeefbe
-		ipv6_addr[1] = 0xaddefec0
-		ipv6_addr[2] = 0x67452301
-		ipv6_addr[3] = 0xefcdab89
+		daddrIPv6[0] = 0xaddeefbe
+		daddrIPv6[1] = 0xaddefec0
+
+		daddrIPv6[2] = 0x67452301
+		daddrIPv6[3] = 0xefcdab89
 
 		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		if status.what != GuessIPv6Addr {
+		if status.what != GuessDaddrIPv6 {
 			conn, err := net.Dial("tcp4", "127.0.0.2:9091")
 			if err != nil {
 				fmt.Printf("error: %v\n", err)
@@ -314,73 +315,73 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			switch status.what {
 			case GuessSaddr:
 				if status.saddr == uint32(saddr) {
-					fmt.Println("offset_saddr found:", status.offset_saddr)
+					fmt.Println("offsetSaddr found:", status.offsetSaddr)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_saddr++
+					status.offsetSaddr++
 					status.status = Checking
 					status.saddr = uint32(saddr)
 				}
 			case GuessDaddr:
 				if status.daddr == uint32(daddr) {
-					fmt.Println("offset_daddr found:", status.offset_daddr)
+					fmt.Println("offsetDaddr found:", status.offsetDaddr)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_daddr++
+					status.offsetDaddr++
 					status.status = Checking
 					status.daddr = uint32(daddr)
 				}
 			case GuessSport:
 				if status.sport == uint16(sport) {
-					fmt.Println("offset_sport found:", status.offset_sport)
+					fmt.Println("offsetSport found:", status.offsetSport)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_sport++
+					status.offsetSport++
 					status.status = Checking
 				}
 			case GuessDport:
 				if status.dport == uint16(dport) {
-					fmt.Println("offset_dport found:", status.offset_dport)
+					fmt.Println("offsetDport found:", status.offsetDport)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_dport++
+					status.offsetDport++
 					status.status = Checking
 				}
 			case GuessNetns:
 				if status.netns == netns {
-					fmt.Println("offset_netns found:", status.offset_netns)
-					fmt.Println("offset_ino found:", status.offset_ino)
+					fmt.Println("offsetNetns found:", status.offsetNetns)
+					fmt.Println("offsetIno found:", status.offsetIno)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_ino++
-					if status.offset_ino >= 200 {
-						status.offset_ino = 15
-						status.offset_netns++
+					status.offsetIno++
+					if status.offsetIno >= 200 {
+						status.offsetIno = 15
+						status.offsetNetns++
 					}
 					status.status = Checking
 				}
 			case GuessFamily:
 				if status.family == uint16(family) {
-					fmt.Println("offset_family found:", status.offset_family)
+					fmt.Println("offsetFamily found:", status.offsetFamily)
 					status.what++
 					status.status = Checking
 				} else {
-					status.offset_family++
+					status.offsetFamily++
 					status.status = Checking
 				}
-			case GuessIPv6Addr:
-				if compareThings(status.ipv6_addr, ipv6_addr) {
-					fmt.Println("offset_ipv6_addr found:", status.offset_ipv6_addr)
+			case GuessDaddrIPv6:
+				if compareThings(status.daddrIPv6, daddrIPv6) {
+					fmt.Println("offsetDaddrIPv6 found:", status.offsetDaddrIPv6)
 					status.what++
 					status.status = Ready
 					break
 				} else {
-					status.offset_ipv6_addr++
+					status.offsetDaddrIPv6++
 					status.status = Checking
 				}
 			default:
@@ -388,13 +389,13 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			}
 		}
 
-		if status.offset_saddr >= 50 ||
-			status.offset_daddr >= 50 ||
-			status.offset_sport >= 50 ||
-			status.offset_dport >= 50 ||
-			status.offset_netns >= 100 ||
-			status.offset_family >= 50 ||
-			status.offset_ipv6_addr >= 100 {
+		if status.offsetSaddr >= 50 ||
+			status.offsetDaddr >= 50 ||
+			status.offsetSport >= 50 ||
+			status.offsetDport >= 50 ||
+			status.offsetNetns >= 100 ||
+			status.offsetFamily >= 50 ||
+			status.offsetDaddrIPv6 >= 100 {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
