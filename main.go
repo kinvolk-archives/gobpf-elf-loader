@@ -129,9 +129,9 @@ func tcpEventCbV6(event tcpEventV6) {
 	daddrbuf := make([]byte, 16)
 
 	binary.LittleEndian.PutUint64(saddrbuf, event.SAddrH)
-	binary.LittleEndian.PutUint64(saddrbuf[4:], event.SAddrL)
+	binary.LittleEndian.PutUint64(saddrbuf[8:], event.SAddrL)
 	binary.LittleEndian.PutUint64(daddrbuf, event.DAddrH)
-	binary.LittleEndian.PutUint64(daddrbuf[4:], event.DAddrL)
+	binary.LittleEndian.PutUint64(daddrbuf[8:], event.DAddrL)
 
 	sIP := net.IP(saddrbuf)
 	dIP := net.IP(daddrbuf)
@@ -140,7 +140,7 @@ func tcpEventCbV6(event tcpEventV6) {
 	dport := event.DPort
 	netns := event.NetNS
 
-	fmt.Printf("%v cpu#%d %s %v %v:%v %v:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
+	fmt.Printf("%v cpu#%d %s %v [%v]:%v [%v]:%v %v\n", timestamp, cpu, typ, pid, sIP, sport, dIP, dport, netns)
 
 	if lastTimestampV6 > timestamp {
 		fmt.Printf("ERROR: late event!\n")
