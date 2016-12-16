@@ -14,7 +14,6 @@ import (
 	"unsafe"
 
 	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
-	"github.com/vishvananda/netns"
 )
 
 type EventType uint32
@@ -159,10 +158,10 @@ const (
 	Ready
 )
 
-type What uint64
+type GuessWhat uint64
 
 const (
-	GuessSaddr What = iota
+	GuessSaddr GuessWhat = iota
 	GuessDaddr
 	GuessSport
 	GuessDport
@@ -175,7 +174,7 @@ type tcpTracerStatus struct {
 	status tcpTracerState
 
 	pidTgid         uint64
-	what            What
+	what            GuessWhat
 	offsetSaddr     uint64
 	offsetDaddr     uint64
 	offsetSport     uint64
@@ -211,7 +210,7 @@ func listen(url, netType string) {
 	}
 }
 
-func compareThings(a, b [4]uint32) bool {
+func compareIPv6(a, b [4]uint32) bool {
 	for i := 2; i < 4; i++ {
 		if a[i] != b[i] {
 			return false
@@ -220,48 +219,42 @@ func compareThings(a, b [4]uint32) bool {
 	return true
 }
 
-func guessWhat(b *bpf.BPFKProbePerf) error {
+func ownNetNS() (uint64, error) {
+	var s syscall.Stat_t
+	if err := syscall.Stat("/proc/self/ns/net", &s); err != nil {
+		return 0, err
+	}
+	return s.Ino, nil
+}
+
+func guessOffsets(b *bpf.BPFKProbePerf) error {
 	go listen("127.0.0.2:9091", "tcp4")
 	time.Sleep(300 * time.Millisecond)
 
-	currentNetns, err := netns.Get()
+	currentNetns, err := ownNetNS()
 	if err != nil {
 		return fmt.Errorf("error getting current netns: %v", err)
 		os.Exit(1)
 	}
-	var s syscall.Stat_t
-	if err := syscall.Fstat(int(currentNetns), &s); err != nil {
-		return fmt.Errorf("NS(%d: unknown)", currentNetns)
-	}
 
 	mp := b.Map("tcptracer_status")
 
-	var pidTgid uint64
-	pidTgid = uint64(os.Getpid()<<32 | syscall.Gettid())
-
 	var zero uint64
-	zero = 0
+	pidTgid := uint64(os.Getpid()<<32 | syscall.Gettid())
 
 	status := tcpTracerStatus{
-		status:       Checking,
-		pidTgid:      pidTgid,
-		what:         0,
-		offsetSaddr:  0,
-		offsetDaddr:  0,
-		offsetSport:  0,
-		offsetDport:  0,
-		offsetNetns:  45,
-		offsetIno:    135,
-		offsetFamily: 0,
-		saddr:        0,
-		daddr:        0,
-		sport:        0,
-		dport:        0,
-		netns:        0,
-		family:       0,
+		status:      Checking,
+		pidTgid:     pidTgid,
+		offsetNetns: 45,
+		offsetIno:   135,
 	}
 
-	for {
+	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	if err != nil {
+		return fmt.Errorf("error: %v", err)
+	}
+
+	for status.status != Ready {
 		// 127.0.0.1
 		saddr := 0x0100007F
 		// 127.0.0.2
@@ -270,7 +263,7 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		dport := 0x8323
 		// will be set later
 		sport := 0
-		netns := uint32(s.Ino)
+		netns := uint32(currentNetns)
 		// AF_INET
 		family := 2
 
@@ -282,11 +275,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 		daddrIPv6[2] = 0x67452301
 		daddrIPv6[3] = 0xefcdab89
 
-		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
-		if err != nil {
-			return fmt.Errorf("error: %v", err)
-		}
-
 		if status.what != GuessDaddrIPv6 {
 			conn, err := net.Dial("tcp4", "127.0.0.2:9091")
 			if err != nil {
@@ -297,7 +285,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			if err != nil {
 				return fmt.Errorf("error: %v", err)
 			}
-
 			conn.Close()
 		} else {
 			conn, err := net.Dial("tcp6", "[dead:c0fe:dead:beef:0123:4567:89ab:cdef]:9092")
@@ -375,11 +362,10 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 					status.status = Checking
 				}
 			case GuessDaddrIPv6:
-				if compareThings(status.daddrIPv6, daddrIPv6) {
+				if compareIPv6(status.daddrIPv6, daddrIPv6) {
 					fmt.Println("offsetDaddrIPv6 found:", status.offsetDaddrIPv6)
 					status.what++
 					status.status = Ready
-					break
 				} else {
 					status.offsetDaddrIPv6++
 					status.status = Checking
@@ -387,6 +373,11 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			default:
 				return fmt.Errorf("Uh, oh!")
 			}
+		}
+
+		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		if err != nil {
+			return fmt.Errorf("error: %v", err)
 		}
 
 		if status.offsetSaddr >= 50 ||
@@ -399,15 +390,6 @@ func guessWhat(b *bpf.BPFKProbePerf) error {
 			fmt.Println("overflow!")
 			os.Exit(1)
 		}
-
-		if status.status == Ready {
-			break
-		}
-	}
-
-	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
-	if err != nil {
-		return fmt.Errorf("error: %v", err)
 	}
 
 	return nil
@@ -431,7 +413,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := guessWhat(b); err != nil {
+	if err := guessOffsets(b); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
