@@ -171,8 +171,7 @@ const (
 )
 
 type tcpTracerStatus struct {
-	status tcpTracerState
-
+	status          tcpTracerState
 	pidTgid         uint64
 	what            GuessWhat
 	offsetSaddr     uint64
@@ -183,14 +182,14 @@ type tcpTracerStatus struct {
 	offsetIno       uint64
 	offsetFamily    uint64
 	offsetDaddrIPv6 uint64
-
-	saddr     uint32
-	daddr     uint32
-	sport     uint16
-	dport     uint16
-	netns     uint32
-	family    uint16
-	daddrIPv6 [4]uint32
+	err             byte
+	saddr           uint32
+	daddr           uint32
+	sport           uint16
+	dport           uint16
+	netns           uint32
+	family          uint16
+	daddrIPv6       [4]uint32
 }
 
 func listen(url, netType string) {
@@ -243,10 +242,8 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 	pidTgid := uint64(os.Getpid()<<32 | syscall.Gettid())
 
 	status := tcpTracerStatus{
-		status:      Checking,
-		pidTgid:     pidTgid,
-		offsetNetns: 45,
-		offsetIno:   135,
+		status:  Checking,
+		pidTgid: pidTgid,
 	}
 
 	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
@@ -271,7 +268,6 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 
 		daddrIPv6[0] = 0xaddeefbe
 		daddrIPv6[1] = 0xaddefec0
-
 		daddrIPv6[2] = 0x67452301
 		daddrIPv6[3] = 0xefcdab89
 
@@ -345,11 +341,12 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 					status.what++
 					status.status = Checking
 				} else {
-					status.offsetIno++
-					if status.offsetIno >= 200 {
-						status.offsetIno = 15
+					// go to the next offsetNetns if we get an error
+					if status.err != 0 || status.offsetIno >= 200 {
+						status.offsetIno = 0
 						status.offsetNetns++
 					}
+					status.offsetIno++
 					status.status = Checking
 				}
 			case GuessFamily:
@@ -380,14 +377,11 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		if status.offsetSaddr >= 50 ||
-			status.offsetDaddr >= 50 ||
-			status.offsetSport >= 50 ||
-			status.offsetDport >= 50 ||
-			status.offsetNetns >= 100 ||
-			status.offsetFamily >= 50 ||
-			status.offsetDaddrIPv6 >= 100 {
-			fmt.Println("overflow!")
+		if status.offsetSaddr >= 200 || status.offsetDaddr >= 200 ||
+			status.offsetSport >= 200 || status.offsetDport >= 200 ||
+			status.offsetNetns >= 200 || status.offsetFamily >= 200 ||
+			status.offsetDaddrIPv6 >= 200 {
+			fmt.Fprintf(os.Stderr, "overflow, bailing out!")
 			os.Exit(1)
 		}
 	}
