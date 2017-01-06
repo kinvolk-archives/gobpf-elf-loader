@@ -14,7 +14,7 @@ import (
 	"time"
 	"unsafe"
 
-	bpf "github.com/kinvolk/gobpf-elf-loader/bpf"
+	"github.com/iovisor/gobpf/elf"
 )
 
 type EventType uint32
@@ -235,7 +235,7 @@ func IPFromUint32Arr(ipv6Addr [4]uint32) net.IP {
 	return net.IP(buf)
 }
 
-func guessOffsets(b *bpf.BPFKProbePerf) error {
+func guessOffsets(b *elf.Module) error {
 	listenIP := "127.0.0.2"
 	listenPort := uint16(9091)
 	bindAddress := fmt.Sprintf("%s:%d", listenIP, listenPort)
@@ -259,7 +259,7 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 		pidTgid: pidTgid,
 	}
 
-	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+	err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status), 0)
 	if err != nil {
 		return fmt.Errorf("error: %v", err)
 	}
@@ -400,7 +400,7 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 			}
 		}
 
-		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status))
+		err = b.UpdateElement(mp, unsafe.Pointer(&zero), unsafe.Pointer(&status), 0)
 		if err != nil {
 			return fmt.Errorf("error: %v", err)
 		}
@@ -423,7 +423,7 @@ func main() {
 		os.Exit(1)
 	}
 	fileName := os.Args[1]
-	b := bpf.NewBpfPerfEvent(fileName)
+	b := elf.NewModule(fileName)
 	if b == nil {
 		fmt.Fprintf(os.Stderr, "System doesn't support BPF\n")
 		os.Exit(1)
@@ -433,6 +433,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
+	}
+
+	for p := range b.IterKprobes() {
+		b.EnableKprobe(p.Name)
 	}
 
 	if err := guessOffsets(b); err != nil {
@@ -474,9 +478,21 @@ func main() {
 		}
 	}()
 
-	b.PollStart("tcp_event_ipv4", channelV4)
-	b.PollStart("tcp_event_ipv6", channelV6)
+	pmIPv4, err := elf.InitPerfMap(b, "tcp_event_ipv4", channelV4)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	pmIPv6, err := elf.InitPerfMap(b, "tcp_event_ipv6", channelV6)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	pmIPv4.PollStart()
+	pmIPv6.PollStart()
 	<-sig
-	b.PollStop("tcp_event_ipv4")
-	b.PollStop("tcp_event_ipv6")
+	pmIPv4.PollStop()
+	pmIPv6.PollStop()
 }
