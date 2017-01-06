@@ -298,6 +298,17 @@ func guessOffsets(b *bpf.BPFKProbePerf) error {
 			if err != nil {
 				return fmt.Errorf("error: %v", err)
 			}
+
+			// set SO_LINGER to 0 so the connection state after closing is
+			// CLOSE instead of TIME_WAIT. In this way, they will disappear
+			// from the conntrack table after around 10 seconds instead of 2
+			// minutes
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.SetLinger(0)
+			} else {
+				panic("not a tcp connection")
+			}
+
 			conn.Close()
 		} else {
 			conn, err := net.Dial("tcp6", fmt.Sprintf("[%s]:9092", ip))
