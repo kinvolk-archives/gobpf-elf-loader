@@ -153,28 +153,28 @@ func tcpEventCbV6(event tcpEventV6) {
 type tcpTracerState uint64
 
 const (
-	Uninitialized tcpTracerState = iota
-	Checking
-	Checked
-	Ready
+	uninitialized tcpTracerState = iota
+	checking
+	checked
+	ready
 )
 
-type GuessWhat uint64
+type guessWhat uint64
 
 const (
-	GuessSaddr GuessWhat = iota
-	GuessDaddr
-	GuessFamily
-	GuessSport
-	GuessDport
-	GuessNetns
-	GuessDaddrIPv6
+	guessSaddr guessWhat = iota
+	guessDaddr
+	guessFamily
+	guessSport
+	guessDport
+	guessNetns
+	guessDaddrIPv6
 )
 
 type tcpTracerStatus struct {
 	status          tcpTracerState
 	pidTgid         uint64
-	what            GuessWhat
+	what            guessWhat
 	offsetSaddr     uint64
 	offsetDaddr     uint64
 	offsetSport     uint64
@@ -193,20 +193,17 @@ type tcpTracerStatus struct {
 	daddrIPv6       [4]uint32
 }
 
-func listen(url, netType string) {
+func listen(url, netType string, finish chan struct{}) {
 	l, err := net.Listen(netType, url)
 	if err != nil {
 		fmt.Println("Error listening:", err.Error())
 		os.Exit(1)
 	}
 	fmt.Println("Listening on " + url)
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			fmt.Println("Error accepting: ", err.Error())
-			os.Exit(1)
-		}
-		conn.Close()
+	select {
+	case <-finish:
+		l.Close()
+		return
 	}
 }
 
@@ -227,7 +224,7 @@ func ownNetNS() (uint64, error) {
 	return s.Ino, nil
 }
 
-func IPFromUint32Arr(ipv6Addr [4]uint32) net.IP {
+func ipFromUint32Arr(ipv6Addr [4]uint32) net.IP {
 	buf := make([]byte, 16)
 	for i := 0; i < 16; i++ {
 		buf[i] = *(*byte)(unsafe.Pointer((uintptr(unsafe.Pointer(&ipv6Addr[0])) + uintptr(i))))
@@ -246,7 +243,8 @@ func guessOffsets(b *elf.Module) error {
 	listenPort := uint16(9091)
 	bindAddress := fmt.Sprintf("%s:%d", listenIP, listenPort)
 
-	go listen(bindAddress, "tcp4")
+	finish := make(chan struct{})
+	go listen(bindAddress, "tcp4", finish)
 	time.Sleep(300 * time.Millisecond)
 
 	currentNetns, err := ownNetNS()
@@ -261,7 +259,7 @@ func guessOffsets(b *elf.Module) error {
 	pidTgid := uint64(os.Getpid()<<32 | syscall.Gettid())
 
 	status := tcpTracerStatus{
-		status:  Checking,
+		status:  checking,
 		pidTgid: pidTgid,
 	}
 
@@ -281,7 +279,7 @@ func guessOffsets(b *elf.Module) error {
 	netns := uint32(currentNetns)
 	family := syscall.AF_INET
 
-	for status.status != Ready {
+	for status.status != ready {
 		var daddrIPv6 [4]uint32
 
 		daddrIPv6[0] = rand.Uint32()
@@ -289,9 +287,9 @@ func guessOffsets(b *elf.Module) error {
 		daddrIPv6[2] = rand.Uint32()
 		daddrIPv6[3] = rand.Uint32()
 
-		ip := IPFromUint32Arr(daddrIPv6)
+		ip := ipFromUint32Arr(daddrIPv6)
 
-		if status.what != GuessDaddrIPv6 {
+		if status.what != guessDaddrIPv6 {
 			conn, err := net.Dial("tcp4", bindAddress)
 			if err != nil {
 				fmt.Printf("error: %v\n", err)
@@ -327,64 +325,64 @@ func guessOffsets(b *elf.Module) error {
 			return fmt.Errorf("error: %v", err)
 		}
 
-		if status.status == Checked {
+		if status.status == checked {
 			switch status.what {
-			case GuessSaddr:
+			case guessSaddr:
 				if status.saddr == uint32(saddr) {
 					fmt.Println("offsetSaddr found:", status.offsetSaddr)
 					status.what++
-					status.status = Checking
+					status.status = checking
 				} else {
 					status.offsetSaddr++
-					status.status = Checking
+					status.status = checking
 					status.saddr = uint32(saddr)
 				}
-			case GuessDaddr:
+			case guessDaddr:
 				if status.daddr == uint32(daddr) {
 					fmt.Println("offsetDaddr found:", status.offsetDaddr)
 					status.what++
-					status.status = Checking
+					status.status = checking
 				} else {
 					status.offsetDaddr++
-					status.status = Checking
+					status.status = checking
 					status.daddr = uint32(daddr)
 				}
-			case GuessFamily:
+			case guessFamily:
 				if status.family == uint16(family) {
 					fmt.Println("offsetFamily found:", status.offsetFamily)
 					status.what++
-					status.status = Checking
+					status.status = checking
 					// we know the sport ((struct inet_sock)->inet_sport) is
 					// after the family field, so we start from there
 					status.offsetSport = status.offsetFamily
 				} else {
 					status.offsetFamily++
-					status.status = Checking
+					status.status = checking
 				}
-			case GuessSport:
+			case guessSport:
 				if status.sport == uint16(sport) {
 					fmt.Println("offsetSport found:", status.offsetSport)
 					status.what++
-					status.status = Checking
+					status.status = checking
 				} else {
 					status.offsetSport++
-					status.status = Checking
+					status.status = checking
 				}
-			case GuessDport:
+			case guessDport:
 				if status.dport == dport {
 					fmt.Println("offsetDport found:", status.offsetDport)
 					status.what++
-					status.status = Checking
+					status.status = checking
 				} else {
 					status.offsetDport++
-					status.status = Checking
+					status.status = checking
 				}
-			case GuessNetns:
+			case guessNetns:
 				if status.netns == netns {
 					fmt.Println("offsetNetns found:", status.offsetNetns)
 					fmt.Println("offsetIno found:", status.offsetIno)
 					status.what++
-					status.status = Checking
+					status.status = checking
 				} else {
 					status.offsetIno++
 					// go to the next offsetNetns if we get an error
@@ -392,16 +390,16 @@ func guessOffsets(b *elf.Module) error {
 						status.offsetIno = 0
 						status.offsetNetns++
 					}
-					status.status = Checking
+					status.status = checking
 				}
-			case GuessDaddrIPv6:
+			case guessDaddrIPv6:
 				if compareIPv6(status.daddrIPv6, daddrIPv6) {
 					fmt.Println("offsetDaddrIPv6 found:", status.offsetDaddrIPv6)
 					status.what++
-					status.status = Ready
+					status.status = ready
 				} else {
 					status.offsetDaddrIPv6++
-					status.status = Checking
+					status.status = checking
 				}
 			default:
 				return fmt.Errorf("Uh, oh!")
@@ -421,6 +419,8 @@ func guessOffsets(b *elf.Module) error {
 			os.Exit(1)
 		}
 	}
+
+	close(finish)
 
 	return nil
 }
