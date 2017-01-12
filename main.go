@@ -164,10 +164,10 @@ type GuessWhat uint64
 const (
 	GuessSaddr GuessWhat = iota
 	GuessDaddr
+	GuessFamily
 	GuessSport
 	GuessDport
 	GuessNetns
-	GuessFamily
 	GuessDaddrIPv6
 )
 
@@ -235,6 +235,12 @@ func IPFromUint32Arr(ipv6Addr [4]uint32) net.IP {
 	return net.IP(buf)
 }
 
+func htons(a uint16) uint16 {
+	arr := make([]byte, 2)
+	binary.BigEndian.PutUint16(arr, a)
+	return byteOrder.Uint16(arr)
+}
+
 func guessOffsets(b *elf.Module) error {
 	listenIP := "127.0.0.2"
 	listenPort := uint16(9091)
@@ -264,10 +270,7 @@ func guessOffsets(b *elf.Module) error {
 		return fmt.Errorf("error: %v", err)
 	}
 
-	// convert to network endianness
-	arr := make([]byte, 2)
-	binary.BigEndian.PutUint16(arr, listenPort)
-	dport := byteOrder.Uint16(arr)
+	dport := htons(listenPort)
 
 	// 127.0.0.1
 	saddr := 0x0100007F
@@ -298,6 +301,8 @@ func guessOffsets(b *elf.Module) error {
 			if err != nil {
 				return fmt.Errorf("error: %v", err)
 			}
+
+			sport = int(htons(uint16(sport)))
 
 			// set SO_LINGER to 0 so the connection state after closing is
 			// CLOSE instead of TIME_WAIT. In this way, they will disappear
@@ -344,6 +349,18 @@ func guessOffsets(b *elf.Module) error {
 					status.status = Checking
 					status.daddr = uint32(daddr)
 				}
+			case GuessFamily:
+				if status.family == uint16(family) {
+					fmt.Println("offsetFamily found:", status.offsetFamily)
+					status.what++
+					status.status = Checking
+					// we know the sport ((struct inet_sock)->inet_sport) is
+					// after the family field, so we start from there
+					status.offsetSport = status.offsetFamily
+				} else {
+					status.offsetFamily++
+					status.status = Checking
+				}
 			case GuessSport:
 				if status.sport == uint16(sport) {
 					fmt.Println("offsetSport found:", status.offsetSport)
@@ -377,15 +394,6 @@ func guessOffsets(b *elf.Module) error {
 					}
 					status.status = Checking
 				}
-			case GuessFamily:
-				if status.family == uint16(family) {
-					fmt.Println("offsetFamily found:", status.offsetFamily)
-					status.what++
-					status.status = Checking
-				} else {
-					status.offsetFamily++
-					status.status = Checking
-				}
 			case GuessDaddrIPv6:
 				if compareIPv6(status.daddrIPv6, daddrIPv6) {
 					fmt.Println("offsetDaddrIPv6 found:", status.offsetDaddrIPv6)
@@ -406,7 +414,7 @@ func guessOffsets(b *elf.Module) error {
 		}
 
 		if status.offsetSaddr >= 200 || status.offsetDaddr >= 200 ||
-			status.offsetSport >= 200 || status.offsetDport >= 200 ||
+			status.offsetSport >= 2000 || status.offsetDport >= 200 ||
 			status.offsetNetns >= 200 || status.offsetFamily >= 200 ||
 			status.offsetDaddrIPv6 >= 200 {
 			fmt.Fprintf(os.Stderr, "overflow, bailing out!\n")
